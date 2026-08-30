@@ -37,10 +37,7 @@ impl Logger {
                 }
 
                 Err(e) => {
-                    eprintln!(
-                        "WAL corruption detected at byte {}: {}",
-                        record_start, e
-                    );
+                    eprintln!("WAL corruption detected at byte {}: {}", record_start, e);
 
                     // Remove the corrupt record and everything after it.
                     file.set_len(record_start)?;
@@ -69,13 +66,7 @@ impl Logger {
             Command::Delete => None,
         };
 
-        let record = LogRecord::new(
-            self.len,
-            command,
-            data_type,
-            key.to_owned(),
-            value,
-        );
+        let record = LogRecord::new(self.len, command, data_type, key.to_owned(), value);
 
         record.write_to(&mut self.file)?;
 
@@ -107,10 +98,7 @@ impl Logger {
                 }
 
                 Err(e) => {
-                    eprintln!(
-                        "WAL corruption detected at byte {}: {}",
-                        record_start, e
-                    );
+                    eprintln!("WAL corruption detected at byte {}: {}", record_start, e);
 
                     // Truncate the invalid record and everything after it.
                     self.file.set_len(record_start)?;
@@ -124,5 +112,14 @@ impl Logger {
         self.file.seek(SeekFrom::End(0))?;
 
         Ok(records)
+    }
+
+    pub fn truncate(&mut self) -> io::Result<()> {
+        self.file.set_len(0)?;
+        self.file.sync_all()?;
+
+        self.len = 0;
+
+        Ok(())
     }
 }

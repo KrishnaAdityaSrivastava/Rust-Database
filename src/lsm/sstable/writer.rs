@@ -4,6 +4,7 @@ use std::path::Path;
 
 use super::format::{Entry, HEADER_SIZE, Header, write_header, write_record};
 use super::index::Index;
+use super::reader::load_entries;
 
 pub fn create(path: &Path) -> io::Result<()> {
     let mut file = File::create_new(path)?;
@@ -90,4 +91,22 @@ pub fn write(path: &Path, entries: &[(&String, &Entry)]) -> io::Result<Index> {
     file.sync_all()?;
 
     Ok(index)
+}
+
+pub fn compact(path_compacted: &Path, path_latest: &Path, path_old: &Path) -> io::Result<SSTable> {
+    let mut table_old = load_entries(path_old, &Index::new())?;
+    let table_latest = load_entries(path_latest, &Index::new())?;
+
+    for (key, entry) in table_latest {
+        table_old.insert(key, entry);
+    }
+
+    let mut entries: Vec<_> = table_old.values().collect();
+    entries.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+
+    let mut sstable = SSTable::new(path_compacted.to_path_buf())?;
+
+    sstable.write_entries(&entries)?;
+
+    Ok(sstable)
 }

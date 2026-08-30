@@ -35,15 +35,15 @@ fn main() {
 
     println!(
         "Name: {}",
-        db.get("name").unwrap_or("Not found".to_string())
+        db.get("name").ok().flatten().unwrap_or("Not found".to_string())
     );
 
     println!(
         "Age: {}",
-        db.get("age").unwrap_or("Not found".to_string())
+        db.get("age").ok().flatten().unwrap_or("Not found".to_string())
     );
     println!(
         "Cat: {}",
-        db.get("cat").unwrap_or("Not found".to_string())
+        db.get("cat").ok().flatten().unwrap_or("Not found".to_string())
     );
 }

@@ -30,10 +30,10 @@ pub fn read_entry(path: &Path, index: &Index, key: &str) -> io::Result<Option<En
     read_record(&mut file)
 }
 
-pub fn load_entries(path: &Path, index: &Index) -> io::Result<Vec<(String, Entry)>> {
+pub fn load_entries(path: &Path, index: &Index) -> io::Result<HashMap<String, Entry>> {
     let mut file = File::open(path)?;
 
-    let mut entries = Vec::with_capacity(index.len());
+    let mut entries = HashMap::with_capacity(index.len());
 
     for index_entry in index.iter() {
         file.seek(SeekFrom::Start(index_entry.offset))?;
@@ -51,7 +51,7 @@ pub fn load_entries(path: &Path, index: &Index) -> io::Result<Vec<(String, Entry
             }
         };
 
-        entries.push((index_entry.key.clone(), entry));
+        entries.insert(index_entry.key.clone(), entry);
     }
 
     Ok(entries)

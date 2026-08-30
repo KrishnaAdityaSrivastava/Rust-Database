@@ -11,70 +11,66 @@ pub struct Database {
     data_threshold: usize,
     log: Logger,
     sstables: Vec<SSTable>,
+    sstable_threshold: usize,
     next_sstable_id: u32,
 }
 
 impl Database {
-    pub fn new(data_threshold: usize) -> Self {
+    pub fn new(data_threshold: usize, sstable_threshold: usize) -> io::Result<Self> {
         let mut database = Self {
             data: HashMap::new(),
             data_threshold,
-            log: Logger::new("database.log".to_string()).expect("Failed to create logger"),
+            log: Logger::new("database.log".to_string())?,
             sstables: Vec::new(),
+            sstable_threshold,
             next_sstable_id: 0,
         };
 
-        database.load_sstables().expect("Failed to load SSTables");
+        database.load_sstables()?;
+        database.recover()?;
 
-        database.recover().expect("Failed to recover database");
-
-        database
+        Ok(database)
     }
 
-    pub fn insert(&mut self, key: String, value: String) {
-        self.log
-            .log(Command::Set, DataType::String, &key, &value)
-            .expect("Failed to write to log");
+    pub fn insert(&mut self, key: String, value: String) -> io::Result<()> {
+        self.log.log(Command::Set, DataType::String, &key, &value)?;
 
         self.data.insert(key, Entry::Set(value));
 
-        if self.data.len() >= self.data_threshold {
-            self.flush_memory_to_disk()
-                .expect("Failed to flush memory to disk");
-        }
+        self.maybe_flush()?;
+        self.maybe_compact()?;
+
+        Ok(())
     }
 
-    pub fn delete(&mut self, key: &str) {
-        self.log
-            .log(Command::Delete, DataType::String, key, "")
-            .expect("Failed to write to log");
+    pub fn delete(&mut self, key: &str) -> io::Result<()> {
+        self.log.log(Command::Delete, DataType::String, key, "")?;
 
         self.data.insert(key.to_owned(), Entry::Delete);
 
-        if self.data.len() >= self.data_threshold {
-            self.flush_memory_to_disk()
-                .expect("Failed to flush memory to disk");
-        }
+        self.maybe_flush()?;
+        self.maybe_compact()?;
+
+        Ok(())
     }
 
-    pub fn get(&self, key: &str) -> Option<String> {
+    pub fn get(&self, key: &str) -> io::Result<Option<String>> {
         if let Some(entry) = self.data.get(key) {
-            return match entry {
+            return Ok(match entry {
                 Entry::Set(value) => Some(value.clone()),
                 Entry::Delete => None,
-            };
+            });
         }
 
         for sstable in self.sstables.iter().rev() {
-            match sstable.read_entry(key) {
-                Ok(Some(Entry::Set(value))) => return Some(value),
-                Ok(Some(Entry::Delete)) => return None,
-                Ok(None) => continue,
-                Err(_) => return None,
+            match sstable.read_entry(key)? {
+                Some(Entry::Set(value)) => return Ok(Some(value)),
+                Some(Entry::Delete) => return Ok(None),
+                None => continue,
             }
         }
 
-        None
+        Ok(None)
     }
 
     pub fn recover(&mut self) -> io::Result<()> {
@@ -91,6 +87,64 @@ impl Database {
                     self.data.insert(record.key().to_owned(), Entry::Delete);
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn maybe_flush(&mut self) -> io::Result<()> {
+        if self.data.len() >= self.data_threshold {
+            self.flush_memory_to_disk()?;
+        }
+
+        Ok(())
+    }
+
+    fn maybe_compact(&mut self) -> io::Result<()> {
+        if self.sstables.len() < self.sstable_threshold {
+            return Ok(());
+        }
+
+        self.compact_all()?;
+
+        Ok(())
+    }
+
+    fn compact_all(&mut self) -> io::Result<()> {
+        if self.sstables.len() < 2 {
+            return Ok(());
+        }
+
+        let mut merged = HashMap::new();
+        let mut old_paths = Vec::new();
+
+        // Older tables first, newer tables later.
+        // Therefore newer values overwrite older values.
+        for sstable in &self.sstables {
+            old_paths.push(sstable.path().to_path_buf());
+
+            for (key, entry) in sstable.load_entries()? {
+                merged.insert(key, entry);
+            }
+        }
+
+        let compacted_path = format!("sstable_{}.sst", self.next_sstable_id).into();
+
+        let mut entries: Vec<_> = merged.iter().collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+
+        let mut compacted = SSTable::new(compacted_path)?;
+        compacted.write_entries(&entries)?;
+
+        self.next_sstable_id += 1;
+
+        // Only modify the SSTable list after successful compaction.
+        self.sstables.clear();
+        self.sstables.push(compacted);
+
+        // Remove old files from disk.
+        for path in old_paths {
+            fs::remove_file(path)?;
         }
 
         Ok(())
@@ -123,7 +177,6 @@ impl Database {
             let file_name = format!("sstable_{id}.sst");
 
             self.sstables.push(SSTable::open(file_name.into())?);
-
             self.next_sstable_id = self.next_sstable_id.max(id + 1);
         }
 
@@ -144,11 +197,10 @@ impl Database {
 
         sstable.write_entries(&entries)?;
 
-        // SSTable is synced before removing the WAL.
-        self.log.truncate()?;
-
         self.sstables.push(sstable);
         self.next_sstable_id += 1;
+
+        self.log.truncate()?;
         self.data.clear();
 
         Ok(())

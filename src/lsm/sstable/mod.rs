@@ -6,6 +6,8 @@ mod writer;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use std::collections::HashMap;
+
 pub use format::Entry;
 
 pub struct SSTable {
@@ -39,7 +41,7 @@ impl SSTable {
         reader::read_entry(&self.file_name, &self.index, key)
     }
 
-    pub fn load_entries(&self) -> io::Result<Vec<(String, Entry)>> {
+    pub fn load_entries(&self) -> io::Result<HashMap<String, Entry>> {
         reader::load_entries(&self.file_name, &self.index)
     }
 

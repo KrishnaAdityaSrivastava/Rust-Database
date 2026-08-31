@@ -5,6 +5,9 @@ use std::path::Path;
 use super::format::{Entry, read_header, read_record};
 use super::index::{Index, read_index};
 
+use std::collections::HashMap;
+
+
 pub fn load_index(path: &Path) -> io::Result<Index> {
     let mut file = File::open(path)?;
 

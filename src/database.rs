@@ -2,26 +2,40 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 
-use super::log_record::{Command, DataType};
-use super::logger::Logger;
-use super::sstable::{Entry, SSTable};
+use super::lsm::sstable::{Entry, SSTable};
+use super::wal::{
+    log_record::{Command, DataType},
+    Logger,
+};
 
 pub struct Database {
     data: HashMap<String, Entry>,
     data_threshold: usize,
     log: Logger,
-    sstables: Vec<SSTable>,
+
+    // leveled_sstable[0] = L0
+    // leveled_sstable[1] = L1
+    // leveled_sstable[2] = L2
+    // ...
+    leveled_sstable: Vec<Vec<SSTable>>,
+
     sstable_threshold: usize,
     next_sstable_id: u32,
 }
 
 impl Database {
-    pub fn new(data_threshold: usize, sstable_threshold: usize) -> io::Result<Self> {
+    pub fn new(
+        sstable_level: usize,
+        data_threshold: usize,
+        sstable_threshold: usize,
+    ) -> io::Result<Self> {
         let mut database = Self {
             data: HashMap::new(),
             data_threshold,
             log: Logger::new("database.log".to_string())?,
-            sstables: Vec::new(),
+            leveled_sstable: (0..sstable_level)
+                .map(|_| Vec::new())
+                .collect(),
             sstable_threshold,
             next_sstable_id: 0,
         };
@@ -33,7 +47,8 @@ impl Database {
     }
 
     pub fn insert(&mut self, key: String, value: String) -> io::Result<()> {
-        self.log.log(Command::Set, DataType::String, &key, &value)?;
+        self.log
+            .log(Command::Set, DataType::String, &key, &value)?;
 
         self.data.insert(key, Entry::Set(value));
 
@@ -44,7 +59,8 @@ impl Database {
     }
 
     pub fn delete(&mut self, key: &str) -> io::Result<()> {
-        self.log.log(Command::Delete, DataType::String, key, "")?;
+        self.log
+            .log(Command::Delete, DataType::String, key, "")?;
 
         self.data.insert(key.to_owned(), Entry::Delete);
 
@@ -55,6 +71,7 @@ impl Database {
     }
 
     pub fn get(&self, key: &str) -> io::Result<Option<String>> {
+        // MemTable is always the newest data.
         if let Some(entry) = self.data.get(key) {
             return Ok(match entry {
                 Entry::Set(value) => Some(value.clone()),
@@ -62,11 +79,19 @@ impl Database {
             });
         }
 
-        for sstable in self.sstables.iter().rev() {
-            match sstable.read_entry(key)? {
-                Some(Entry::Set(value)) => return Ok(Some(value)),
-                Some(Entry::Delete) => return Ok(None),
-                None => continue,
+        // Search newer levels first.
+        //
+        // L0 contains newer data than L1.
+        // L1 contains newer data than L2.
+        //
+        // Within a level, newer SSTables are at the end.
+        for level in &self.leveled_sstable {
+            for sstable in level.iter().rev() {
+                match sstable.read_entry(key)? {
+                    Some(Entry::Set(value)) => return Ok(Some(value)),
+                    Some(Entry::Delete) => return Ok(None),
+                    None => continue,
+                }
             }
         }
 
@@ -78,13 +103,16 @@ impl Database {
             match record.command() {
                 Command::Set => {
                     if let Some(value) = record.value() {
-                        self.data
-                            .insert(record.key().to_owned(), Entry::Set(value.to_owned()));
+                        self.data.insert(
+                            record.key().to_owned(),
+                            Entry::Set(value.to_owned()),
+                        );
                     }
                 }
 
                 Command::Delete => {
-                    self.data.insert(record.key().to_owned(), Entry::Delete);
+                    self.data
+                        .insert(record.key().to_owned(), Entry::Delete);
                 }
             }
         }
@@ -101,26 +129,59 @@ impl Database {
     }
 
     fn maybe_compact(&mut self) -> io::Result<()> {
-        if self.sstables.len() < self.sstable_threshold {
+        if self.leveled_sstable.len() < 2 {
             return Ok(());
         }
 
-        self.compact_all()?;
+        // Check each level except the last one.
+        //
+        // If L0 reaches the threshold:
+        //
+        // L0 + L1 → L1
+        //
+        // If L1 reaches the threshold:
+        //
+        // L1 + L2 → L2
+        //
+        // etc.
+        for level in 0..self.leveled_sstable.len() - 1 {
+            if self.leveled_sstable[level].len() >= self.sstable_threshold {
+                self.compact_level(level)?;
+            }
+        }
 
         Ok(())
     }
 
-    fn compact_all(&mut self) -> io::Result<()> {
-        if self.sstables.len() < 2 {
+    fn compact_level(&mut self, level: usize) -> io::Result<()> {
+        if level + 1 >= self.leveled_sstable.len() {
             return Ok(());
         }
 
-        let mut merged = HashMap::new();
+        if self.leveled_sstable[level].is_empty() {
+            return Ok(());
+        }
+
+        let mut merged: HashMap<String, Entry> = HashMap::new();
         let mut old_paths = Vec::new();
 
-        // Older tables first, newer tables later.
-        // Therefore newer values overwrite older values.
-        for sstable in &self.sstables {
+        // ---------------------------------------------------------
+        // First load the OLDER level.
+        // ---------------------------------------------------------
+        //
+        // Example:
+        //
+        // L1:
+        //   x = 10
+        //
+        // L0:
+        //   x = 20
+        //
+        // We load L1 first, then L0, so L0 overwrites L1.
+        //
+        // This makes newer data win.
+        //
+        for sstable in &self.leveled_sstable[level + 1] {
             old_paths.push(sstable.path().to_path_buf());
 
             for (key, entry) in sstable.load_entries()? {
@@ -128,21 +189,47 @@ impl Database {
             }
         }
 
-        let compacted_path = format!("sstable_{}.sst", self.next_sstable_id).into();
+        // ---------------------------------------------------------
+        // Then load the NEWER level.
+        // ---------------------------------------------------------
+        for sstable in &self.leveled_sstable[level] {
+            old_paths.push(sstable.path().to_path_buf());
+
+            for (key, entry) in sstable.load_entries()? {
+                merged.insert(key, entry);
+            }
+        }
+
+        // ---------------------------------------------------------
+        // Create the new compacted SSTable.
+        // ---------------------------------------------------------
+        let compacted_path =
+            format!("sstable_{}.sst", self.next_sstable_id).into();
 
         let mut entries: Vec<_> = merged.iter().collect();
+
         entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
         let mut compacted = SSTable::new(compacted_path)?;
+
         compacted.write_entries(&entries)?;
 
         self.next_sstable_id += 1;
 
-        // Only modify the SSTable list after successful compaction.
-        self.sstables.clear();
-        self.sstables.push(compacted);
+        // ---------------------------------------------------------
+        // Replace the destination level.
+        // ---------------------------------------------------------
+        self.leveled_sstable[level + 1].clear();
+        self.leveled_sstable[level + 1].push(compacted);
 
-        // Remove old files from disk.
+        // ---------------------------------------------------------
+        // Source level is now empty.
+        // ---------------------------------------------------------
+        self.leveled_sstable[level].clear();
+
+        // ---------------------------------------------------------
+        // Delete the old SSTable files.
+        // ---------------------------------------------------------
         for path in old_paths {
             fs::remove_file(path)?;
         }
@@ -173,10 +260,26 @@ impl Database {
 
         ids.sort_unstable();
 
+        if self.leveled_sstable.is_empty() {
+            return Ok(());
+        }
+
+        // ---------------------------------------------------------
+        // For now, load existing SSTables into L0.
+        // ---------------------------------------------------------
+        //
+        // This is enough while developing the level system.
+        // Later we should persist the level number in the filename
+        // so the database knows exactly which SSTable belongs to
+        // which level after restart.
+        //
         for id in ids {
             let file_name = format!("sstable_{id}.sst");
 
-            self.sstables.push(SSTable::open(file_name.into())?);
+            let sstable = SSTable::open(file_name.into())?;
+
+            self.leveled_sstable[0].push(sstable);
+
             self.next_sstable_id = self.next_sstable_id.max(id + 1);
         }
 
@@ -188,19 +291,26 @@ impl Database {
             return Ok(());
         }
 
-        let file_name = format!("sstable_{}.sst", self.next_sstable_id);
+        // New SSTables always enter L0.
+        let file_name =
+            format!("sstable_{}.sst", self.next_sstable_id);
 
         let mut sstable = SSTable::new(file_name.into())?;
 
         let mut entries: Vec<_> = self.data.iter().collect();
+
         entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
         sstable.write_entries(&entries)?;
 
-        self.sstables.push(sstable);
+        self.leveled_sstable[0].push(sstable);
+
         self.next_sstable_id += 1;
 
+        // WAL can be truncated only after the SSTable has been
+        // successfully written.
         self.log.truncate()?;
+
         self.data.clear();
 
         Ok(())

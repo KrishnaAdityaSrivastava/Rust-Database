@@ -2,26 +2,24 @@ use std::collections::HashMap;
 use std::fs;
 use std::io;
 
+use std::sync::{Arc, RwLock};
+
 use super::lsm::sstable::{Entry, SSTable};
 use super::wal::{
-    log_record::{Command, DataType},
     Logger,
+    log_record::{Command, DataType},
 };
 
 pub struct Database {
     data: HashMap<String, Entry>,
     data_threshold: usize,
     log: Logger,
-
-    // leveled_sstable[0] = L0
-    // leveled_sstable[1] = L1
-    // leveled_sstable[2] = L2
-    // ...
     leveled_sstable: Vec<Vec<SSTable>>,
 
     sstable_threshold: usize,
     next_sstable_id: u32,
 }
+
 
 impl Database {
     pub fn new(
@@ -33,9 +31,7 @@ impl Database {
             data: HashMap::new(),
             data_threshold,
             log: Logger::new("database.log".to_string())?,
-            leveled_sstable: (0..sstable_level)
-                .map(|_| Vec::new())
-                .collect(),
+            leveled_sstable: (0..sstable_level).map(|_| Vec::new()).collect(),
             sstable_threshold,
             next_sstable_id: 0,
         };
@@ -47,8 +43,7 @@ impl Database {
     }
 
     pub fn insert(&mut self, key: String, value: String) -> io::Result<()> {
-        self.log
-            .log(Command::Set, DataType::String, &key, &value)?;
+        self.log.log(Command::Set, DataType::String, &key, &value)?;
 
         self.data.insert(key, Entry::Set(value));
 
@@ -59,8 +54,7 @@ impl Database {
     }
 
     pub fn delete(&mut self, key: &str) -> io::Result<()> {
-        self.log
-            .log(Command::Delete, DataType::String, key, "")?;
+        self.log.log(Command::Delete, DataType::String, key, "")?;
 
         self.data.insert(key.to_owned(), Entry::Delete);
 
@@ -79,12 +73,6 @@ impl Database {
             });
         }
 
-        // Search newer levels first.
-        //
-        // L0 contains newer data than L1.
-        // L1 contains newer data than L2.
-        //
-        // Within a level, newer SSTables are at the end.
         for level in &self.leveled_sstable {
             for sstable in level.iter().rev() {
                 match sstable.read_entry(key)? {
@@ -103,16 +91,13 @@ impl Database {
             match record.command() {
                 Command::Set => {
                     if let Some(value) = record.value() {
-                        self.data.insert(
-                            record.key().to_owned(),
-                            Entry::Set(value.to_owned()),
-                        );
+                        self.data
+                            .insert(record.key().to_owned(), Entry::Set(value.to_owned()));
                     }
                 }
 
                 Command::Delete => {
-                    self.data
-                        .insert(record.key().to_owned(), Entry::Delete);
+                    self.data.insert(record.key().to_owned(), Entry::Delete);
                 }
             }
         }
@@ -133,17 +118,6 @@ impl Database {
             return Ok(());
         }
 
-        // Check each level except the last one.
-        //
-        // If L0 reaches the threshold:
-        //
-        // L0 + L1 → L1
-        //
-        // If L1 reaches the threshold:
-        //
-        // L1 + L2 → L2
-        //
-        // etc.
         for level in 0..self.leveled_sstable.len() - 1 {
             if self.leveled_sstable[level].len() >= self.sstable_threshold {
                 self.compact_level(level)?;
@@ -165,22 +139,6 @@ impl Database {
         let mut merged: HashMap<String, Entry> = HashMap::new();
         let mut old_paths = Vec::new();
 
-        // ---------------------------------------------------------
-        // First load the OLDER level.
-        // ---------------------------------------------------------
-        //
-        // Example:
-        //
-        // L1:
-        //   x = 10
-        //
-        // L0:
-        //   x = 20
-        //
-        // We load L1 first, then L0, so L0 overwrites L1.
-        //
-        // This makes newer data win.
-        //
         for sstable in &self.leveled_sstable[level + 1] {
             old_paths.push(sstable.path().to_path_buf());
 
@@ -189,9 +147,6 @@ impl Database {
             }
         }
 
-        // ---------------------------------------------------------
-        // Then load the NEWER level.
-        // ---------------------------------------------------------
         for sstable in &self.leveled_sstable[level] {
             old_paths.push(sstable.path().to_path_buf());
 
@@ -200,11 +155,7 @@ impl Database {
             }
         }
 
-        // ---------------------------------------------------------
-        // Create the new compacted SSTable.
-        // ---------------------------------------------------------
-        let compacted_path =
-            format!("sstable_{}.sst", self.next_sstable_id).into();
+        let compacted_path = format!("sstable_{}.sst", self.next_sstable_id).into();
 
         let mut entries: Vec<_> = merged.iter().collect();
 
@@ -216,20 +167,11 @@ impl Database {
 
         self.next_sstable_id += 1;
 
-        // ---------------------------------------------------------
-        // Replace the destination level.
-        // ---------------------------------------------------------
         self.leveled_sstable[level + 1].clear();
         self.leveled_sstable[level + 1].push(compacted);
 
-        // ---------------------------------------------------------
-        // Source level is now empty.
-        // ---------------------------------------------------------
         self.leveled_sstable[level].clear();
 
-        // ---------------------------------------------------------
-        // Delete the old SSTable files.
-        // ---------------------------------------------------------
         for path in old_paths {
             fs::remove_file(path)?;
         }
@@ -292,8 +234,7 @@ impl Database {
         }
 
         // New SSTables always enter L0.
-        let file_name =
-            format!("sstable_{}.sst", self.next_sstable_id);
+        let file_name = format!("sstable_{}.sst", self.next_sstable_id);
 
         let mut sstable = SSTable::new(file_name.into())?;
 

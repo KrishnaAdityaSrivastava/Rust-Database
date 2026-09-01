@@ -1,18 +1,29 @@
 use std::io;
 
 mod database;
-mod wal;
 mod lsm;
+mod wal;
 
 use database::Database;
+
+use std::sync::{Arc, RwLock};
 
 fn main() -> io::Result<()> {
     // Flush memtable after 2 entries.
     // Compact when 2 SSTables exist.
-    let mut db = Database::new(2, 2,3)?;
+    let db = Arc::new(RwLock::new(Database::new(2, 2, 3)?));
+    let db2 = Arc::clone(&db);
+
+    std::thread::spawn(move || {
+        let mut db = db2.write().unwrap();
+
+        db.insert("name".into(), "krishna".into()).unwrap();
+    });
+
+
 
     println!("--- INSERTING ---");
-
+    db.write();
     db.insert("name".to_string(), "Bob".to_string())?;
     db.insert("age".to_string(), "19".to_string())?;
     // Flush #1 happens here.

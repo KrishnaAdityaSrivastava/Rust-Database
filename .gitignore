@@ -1,3 +1,4 @@
 /target
 database.log
 sstable_*.sst
+database_old.rs

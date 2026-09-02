@@ -1,6 +1,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom};
 
+use std::path::Path;
+
 use super::log_record::{Command, DataType, LogRecord};
 
 pub struct Logger {
@@ -9,7 +11,7 @@ pub struct Logger {
 }
 
 impl Logger {
-    pub fn new(file_name: String) -> io::Result<Self> {
+    pub fn new(file_name: impl AsRef<Path>) -> io::Result<Self> {
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)

@@ -23,7 +23,7 @@ pub struct Database {
 
     // Only one thread can perform a flush at a time.
     pub(crate) flush_lock: Mutex<()>,
-    
+
     // Only one thread can perform compaction at a time.
     pub(crate) compaction_lock: Mutex<()>,
 

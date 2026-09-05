@@ -1,3 +1,4 @@
+pub mod async_ops;
 pub mod compact;
 pub mod flush;
 pub mod recovery;
@@ -33,6 +34,9 @@ pub struct Database {
     pub(crate) sstable_threshold: usize,
 
     pub(crate) next_sstable_id: AtomicU32,
+
+    pub(crate) total_compactions: std::sync::atomic::AtomicU64,
+    pub(crate) compaction_duration_micros: std::sync::atomic::AtomicU64,
 }
 
 impl Database {
@@ -63,12 +67,33 @@ impl Database {
             data_threshold,
             sstable_threshold,
             next_sstable_id: AtomicU32::new(0),
+            total_compactions: std::sync::atomic::AtomicU64::new(0),
+            compaction_duration_micros: std::sync::atomic::AtomicU64::new(0),
         };
 
         database.load_sstables()?;
         database.recover()?;
 
         Ok(database)
+    }
+
+    pub fn disk_usage_bytes(&self) -> io::Result<u64> {
+        let mut total = 0;
+        if self.dir.exists() {
+            for entry in std::fs::read_dir(&self.dir)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    total += entry.metadata()?.len();
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    pub fn compaction_stats(&self) -> (u64, std::time::Duration) {
+        let count = self.total_compactions.load(std::sync::atomic::Ordering::Relaxed);
+        let micros = self.compaction_duration_micros.load(std::sync::atomic::Ordering::Relaxed);
+        (count, std::time::Duration::from_micros(micros))
     }
 
     pub fn insert(&self, key: String, value: String) -> io::Result<()> {

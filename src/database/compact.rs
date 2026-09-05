@@ -33,6 +33,7 @@ impl Database {
     }
 
     pub(crate) fn compact_level(&self, level: usize) -> io::Result<()> {
+        let start = std::time::Instant::now();
         /*
          * Take Arc snapshots of the SSTables.
          *
@@ -123,6 +124,10 @@ impl Database {
         for path in old_paths {
             fs::remove_file(path)?;
         }
+
+        self.total_compactions.fetch_add(1, Ordering::Relaxed);
+        let elapsed_micros = start.elapsed().as_micros() as u64;
+        self.compaction_duration_micros.fetch_add(elapsed_micros, Ordering::Relaxed);
 
         Ok(())
     }

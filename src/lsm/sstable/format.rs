@@ -2,14 +2,6 @@ use std::io::{self, Read, Write};
 
 pub const MAGIC: &[u8; 4] = b"SST1";
 pub const VERSION: u8 = 1;
-
-// Header:
-//
-// magic        : 4 bytes
-// version      : 1 byte
-// index_offset : 8 bytes
-// index_len    : 8 bytes
-// entry_count  : 8 bytes
 pub const HEADER_SIZE: u64 = 29;
 
 #[derive(Debug)]
@@ -77,8 +69,8 @@ pub fn write_record<W: Write>(writer: &mut W, key: &str, entry: &Entry) -> io::R
     let key_bytes = key.as_bytes();
 
     let (entry_type, value_bytes) = match entry {
-        Entry::Set(value) => (0, value.as_bytes()),
-        Entry::Delete => (1, &[][..]),
+        Entry::Set(value) => (0u8, value.as_bytes()),
+        Entry::Delete => (1u8, &[][..]),
     };
 
     let key_len = u32::try_from(key_bytes.len())
@@ -87,27 +79,25 @@ pub fn write_record<W: Write>(writer: &mut W, key: &str, entry: &Entry) -> io::R
     let value_len = u32::try_from(value_bytes.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "value is too large"))?;
 
-    // Record:
-    //
-    // [entry_type : 1 byte]
-    // [key_len    : 4 bytes]
-    // [value_len  : 4 bytes]
-    // [key        : key_len bytes]
-    // [value      : value_len bytes]
+    // [entry_type: 1] [key_len: 4] [value_len: 4] [key] [value]
 
-    writer.write_all(&[entry_type])?;
-    writer.write_all(&key_len.to_le_bytes())?;
-    writer.write_all(&value_len.to_le_bytes())?;
+    let mut header = [0u8; 9];
+
+    header[0] = entry_type;
+    header[1..5].copy_from_slice(&key_len.to_le_bytes());
+    header[5..9].copy_from_slice(&value_len.to_le_bytes());
+
+    writer.write_all(&header)?;
     writer.write_all(key_bytes)?;
     writer.write_all(value_bytes)?;
 
     Ok(())
 }
 
-pub fn read_record<R: Read>(reader: &mut R) -> io::Result<Option<Entry>> {
-    let mut entry_type = [0u8; 1];
+pub fn read_record<R: Read>(reader: &mut R) -> io::Result<Option<(String, Entry)>> {
+    let mut header = [0u8; 9];
 
-    match reader.read_exact(&mut entry_type) {
+    match reader.read_exact(&mut header) {
         Ok(()) => {}
 
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
@@ -117,30 +107,28 @@ pub fn read_record<R: Read>(reader: &mut R) -> io::Result<Option<Entry>> {
         Err(error) => return Err(error),
     }
 
-    let mut buffer = [0u8; 4];
+    let entry_type = header[0];
 
-    reader.read_exact(&mut buffer)?;
-    let key_len = u32::from_le_bytes(buffer);
+    let key_len = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
 
-    reader.read_exact(&mut buffer)?;
-    let value_len = u32::from_le_bytes(buffer);
+    let value_len = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
 
-    let mut key = vec![0u8; key_len as usize];
-    reader.read_exact(&mut key)?;
+    let mut key_bytes = vec![0u8; key_len];
+    reader.read_exact(&mut key_bytes)?;
 
-    let mut value = vec![0u8; value_len as usize];
-    reader.read_exact(&mut value)?;
-
-    String::from_utf8(key)
+    let key = String::from_utf8(key_bytes)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 key in SSTable"))?;
 
-    match entry_type[0] {
+    let entry = match entry_type {
         0 => {
-            let value = String::from_utf8(value).map_err(|_| {
+            let mut value_bytes = vec![0u8; value_len];
+            reader.read_exact(&mut value_bytes)?;
+
+            let value = String::from_utf8(value_bytes).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 value in SSTable")
             })?;
 
-            Ok(Some(Entry::Set(value)))
+            Entry::Set(value)
         }
 
         1 => {
@@ -151,12 +139,16 @@ pub fn read_record<R: Read>(reader: &mut R) -> io::Result<Option<Entry>> {
                 ));
             }
 
-            Ok(Some(Entry::Delete))
+            Entry::Delete
         }
 
-        _ => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid SSTable entry type",
-        )),
-    }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid SSTable entry type",
+            ));
+        }
+    };
+
+    Ok(Some((key, entry)))
 }

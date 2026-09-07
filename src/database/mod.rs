@@ -1,4 +1,3 @@
-pub mod async_ops;
 pub mod compact;
 pub mod flush;
 pub mod recovery;

@@ -3,11 +3,9 @@ mod index;
 mod reader;
 mod writer;
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-
-
-use std::collections::HashMap;
 
 pub use format::Entry;
 
@@ -43,10 +41,20 @@ impl SSTable {
     }
 
     pub fn load_entries(&self) -> io::Result<HashMap<String, Entry>> {
-        reader::load_entries(&self.file_name, &self.index)
+        let entries = reader::load_entries_sequential(&self.file_name)?;
+
+        Ok(entries.into_iter().collect())
     }
 
     pub fn path(&self) -> &Path {
         &self.file_name
+    }
+
+    pub(crate) fn sequential_reader(&self) -> io::Result<reader::SequentialReader> {
+        reader::SequentialReader::open(&self.file_name)
+    }
+
+    pub(crate) fn streaming_writer(path: &Path) -> io::Result<writer::StreamingWriter> {
+        writer::StreamingWriter::create(path)
     }
 }

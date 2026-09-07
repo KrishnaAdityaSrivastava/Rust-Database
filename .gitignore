@@ -3,3 +3,5 @@
 sstable_*.sst
 database_old.rs
 networkbacku.rs
+arch.md
+perf.*

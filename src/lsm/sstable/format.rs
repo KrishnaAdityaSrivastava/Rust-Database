@@ -99,11 +99,9 @@ pub fn read_record<R: Read>(reader: &mut R) -> io::Result<Option<(String, Entry)
 
     match reader.read_exact(&mut header) {
         Ok(()) => {}
-
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
             return Ok(None);
         }
-
         Err(error) => return Err(error),
     }
 
@@ -113,21 +111,11 @@ pub fn read_record<R: Read>(reader: &mut R) -> io::Result<Option<(String, Entry)
 
     let value_len = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
 
-    let mut key_bytes = vec![0u8; key_len];
-    reader.read_exact(&mut key_bytes)?;
-
-    let key = String::from_utf8(key_bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 key in SSTable"))?;
+    let key = read_string(reader, key_len, "key")?;
 
     let entry = match entry_type {
         0 => {
-            let mut value_bytes = vec![0u8; value_len];
-            reader.read_exact(&mut value_bytes)?;
-
-            let value = String::from_utf8(value_bytes).map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 value in SSTable")
-            })?;
-
+            let value = read_string(reader, value_len, "value")?;
             Entry::Set(value)
         }
 
@@ -151,4 +139,16 @@ pub fn read_record<R: Read>(reader: &mut R) -> io::Result<Option<(String, Entry)
     };
 
     Ok(Some((key, entry)))
+}
+
+fn read_string<R: Read>(reader: &mut R, len: usize, field: &'static str) -> io::Result<String> {
+    let mut bytes = vec![0u8; len];
+    reader.read_exact(&mut bytes)?;
+
+    String::from_utf8(bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid UTF-8 {field} in SSTable"),
+        )
+    })
 }

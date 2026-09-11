@@ -181,9 +181,9 @@ impl Database {
         }
 
         // Finalize the SSTable and write its index/header.
-        writer.finish()?;
+        let index = writer.finish()?;
 
-        let compacted = SSTable::open(compacted_path.clone())?;
+        let compacted = SSTable::from_parts(compacted_path.clone(), index)?;
 
         // Publish the new SSTable.
         {

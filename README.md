@@ -1,184 +1,316 @@
 # Rust-Database
 
+**Rust-Database** is a Rust-based key-value storage engine evolving into a small distributed database.
+
+It is built from scratch to explore the internals of persistent storage and distributed systems, including Write-Ahead Logging, LSM trees, SSTables, compaction, TCP networking, and Raft consensus.
+
+The project focuses on understanding system behavior through implementation, benchmarking, and Linux `perf` profiling rather than relying on existing database frameworks.
+
+---
+
+## Highlights
+
+* Persistent key-value storage using a WAL and immutable SSTables
+* LSM-tree storage with indexed reads and leveled compaction
+* TCP-based database communication using Tokio
+* Raft consensus implemented from scratch
+* Leader election, replicated logs, quorum commitment, and follower recovery
+* Benchmark-driven optimization using Linux `perf`
+
+---
+
+## Performance at a Glance
+
+The current benchmark evaluates the storage engine across standalone and Raft-backed workloads.
+
+| Workload                   |          Throughput | p50 Latency | p95 Latency | p99 Latency |
+| -------------------------- | ------------------: | ----------: | ----------: | ----------: |
+| Standalone Insert (10k)    |    **97,082 ops/s** |    7.337 µs |    9.546 µs |   17.434 µs |
+| Standalone Read Hit (10k)  |   **265,966 ops/s** |    3.696 µs |    3.785 µs |    3.993 µs |
+| Standalone Read Miss (10k) | **1,678,406 ops/s** |      552 ns |      564 ns |      577 ns |
+| Standalone Update (10k)    |    **81,853 ops/s** |    7.353 µs |    7.608 µs |   16.001 µs |
+| Standalone Delete (5k)     |    **92,509 ops/s** |    6.369 µs |    7.575 µs |   14.653 µs |
+| 1-Node Raft (5k)           |   **106,307 ops/s** |    7.770 µs |    7.972 µs |   14.712 µs |
+| 3-Node Raft (5k)           |    **33,580 ops/s** |   23.386 µs |   30.318 µs |  103.867 µs |
+| 5-Node Raft (5k)           |    **20,864 ops/s** |   38.668 µs |   45.001 µs |  117.940 µs |
+
+The latest benchmark completed in **0.79 seconds** with a process RSS of **6.46 MB**. During the workload, 31 compaction passes were performed with a combined compaction time of **72.027 ms**.
+
+> Benchmarks are intended to track implementation and optimization progress, not to claim production-level performance.
+
+---
+
+## Correctness
+
+The unified test suite validates both the standalone engine and replicated configurations.
+
+| Configuration | Operations | Result              |
+| ------------- | ---------: | ------------------- |
+| Standalone    |     20,000 | **100% data match** |
+| 1-Node Raft   |     10,000 | **100% data match** |
+| 3-Node Raft   |     10,000 | **100% data match** |
+| 5-Node Raft   |     10,000 | **100% data match** |
+
+```text
+test result: ok
+1 passed; 0 failed
+```
+
+---
+
+# Architecture
+
+```text
+                         Client
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │     Raft    │
+                    │  (optional) │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │   Database  │
+                    └──────┬──────┘
+                           │
+                 ┌─────────┴─────────┐
+                 ▼                   ▼
+              MemTable               WAL
+                 │
+                 ▼
+              SSTables
+                 │
+                 ▼
+           Leveled Compaction
+```
+
+The storage engine can run independently or underneath the Raft replication layer.
+
+---
+
+# Storage Engine
+
+Rust-Database uses an LSM-style architecture.
+
+Writes are applied to an in-memory structure and recorded in the WAL. Once the configured threshold is reached, the in-memory data is flushed into an immutable SSTable.
+
+```text
+Write
+  │
+  ├──────────────► WAL
+  │
+  ▼
+MemTable
+  │
+  ▼
+SSTable
+  │
+  ▼
+Compaction
+```
+
+SSTables contain sorted records and an index used for efficient point lookups. Reads therefore do not require scanning the entire file.
+
+The WAL provides recovery by replaying persisted operations during startup.
+
+---
+
+# SSTables & Compaction
+
+SSTables are immutable once written. Sequential access uses a 256 KiB `BufReader` to reduce small-read and syscall overhead.
+
+Compaction performs a streaming merge of sorted SSTables:
+
+```text
+SSTables
+   │
+   ▼
+SequentialReader
+   │
+   ▼
+BinaryHeap
+   │
+   ▼
+StreamingWriter
+   │
+   ▼
+New SSTable
+```
+
+The compaction path does not reload existing SSTables. Already-open SSTable objects are used directly as sequential readers.
+
+---
+
+# Raft
+
+The distributed layer implements Raft from scratch over Tokio TCP.
+
+The implementation covers leader election, terms and voting, replicated logs, `RequestVote` and `AppendEntries` RPCs, quorum-based commitment, log conflict resolution, follower catch-up, and persistent consensus state.
+
+The same storage engine can therefore be used as a standalone database or as a replicated Raft node.
+
+The current test suite validates operation across 1, 3, and 5-node configurations, with all tested workloads producing a 100% data match.
+
+---
+
+# Performance Engineering
+
+Performance work has followed a simple loop:
+
+```text
+Benchmark → Profile → Identify bottleneck → Optimize → Benchmark again
+```
+
+Linux `perf` was used to inspect CPU, syscall, allocation, and filesystem overhead.
+
+Several early bottlenecks have already been removed.
+
+SSTable sequential reads were buffered to reduce repeated kernel reads. Per-record `stream_position()` calls were removed because the SSTable already stores its entry count. SSTables now retain their file handles instead of reopening files for every point lookup. Compaction also avoids reopening a newly-created SSTable just to reload an index that already exists in memory.
+
+These changes shifted the profile away from the original syscall-heavy read path and toward the actual work performed during compaction.
+
+---
+
+# Profiling
+
+Representative profiling commands:
+
+```bash
 sudo perf stat \
-  -e cycles,instructions,context-switches,cpu-migrations,page-faults,minor-faults,major-faults \
-  ./target/release/deps/unified_suite-9f095a716cb6b1fa --nocapture
+    -e cycles,instructions,context-switches,cpu-migrations,page-faults,minor-faults,major-faults \
+    ./target/release/deps/unified_suite --nocapture
+```
 
-running 1 test
+For call-graph profiling:
 
-==========================================================================================
-        UNIFIED STRESS TEST, CORRECTNESS VERIFICATION & BENCHMARK SUITE                   
-==========================================================================================
+```bash
+sudo perf record -g --call-graph dwarf \
+    ./target/release/deps/unified_suite --nocapture
+```
 
---- 1. CORRECTNESS VERIFICATION RESULTS ---
-Standalone Engine Correctness (20,000 Ops):  PASSED [100% Data Match]
-1-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-3-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-5-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
+An earlier profiling run recorded approximately **33.4 billion cycles** and **29.1 billion instructions** over a 13.47-second workload.
 
---- 2. BENCHMARK METRICS SUMMARY TABLE ---
-Configuration          | Throughput (ops/s) | p50 Latency  | p95 Latency  | p99 Latency 
-------------------------------------------------------------------------------------------
-Standalone SET (20k)   | 4910.06         | 7.448µs      | 12.632µs     | 21.538µs    
-Standalone GET (20k)   | 119738.69       | 7.743µs      | 11.39µs      | 17.443µs    
-1-Node Raft (10k)      | 9605.81         | 7.696µs      | 11.304µs     | 21.463µs    
-3-Node Raft (10k)      | 3261.39         | 23.036µs     | 34.955µs     | 326.753µs   
-5-Node Raft (10k)      | 1978.86         | 38.397µs     | 61.43µs      | 1.264357ms  
+Profiling is used to determine whether a slowdown originates from application code, memory allocation, serialization, filesystem operations, or the Linux kernel rather than optimizing based purely on intuition.
 
---- 3. RESOURCE FOOTPRINT & COMPACTION OVERHEAD ---
-Process Memory (RSS):    6.65 MB
-On-Disk Storage Size:    965.74 KB
-Compactions Triggered:   25 passes
-Total Compaction Time:   3.667924s
-test run_unified_stress_correctness_and_benchmarks ... ok
+---
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.52s
+# Current Optimization
 
+The major I/O inefficiencies identified during earlier profiling have largely been addressed:
 
- Performance counter stats for './target/release/deps/unified_suite-9f095a716cb6b1fa --nocapture':
+```text
+Repeated SSTable opens      → fixed
+Small sequential reads      → buffered
+Per-record stream_position  → removed
+Redundant SSTable reopen    → removed
+WAL recovery small reads    → buffered
+Unnecessary WAL end seek    → removed
+```
 
-    33,590,124,199      cycles                                                                
-    29,149,101,224      instructions                     #    0.87  insn per cycle            
-               136      context-switches                                                      
-                 8      cpu-migrations                                                        
-            13,475      page-faults                                                           
-            13,473      minor-faults                                                          
-                 0      major-faults                                                          
+The current focus is the compaction path, particularly record allocation and copying during `read_record()`, serialization in `write_record()`, and the overhead of maintaining the `BinaryHeap` merge structure.
 
-      13.519647731 seconds time elapsed
+---
 
-       6.760684000 seconds user
-       6.756684000 seconds sys
+# Installation
 
+## Requirements
 
-krishna@mx:~/Coding/Rust/kv-store
-$ sudo perf record -g --call-graph dwarf \
-  ./target/release/deps/unified_suite-9f095a716cb6b1fa --nocapture
+Rust stable and Linux are currently required. Linux `perf` is used for performance profiling.
 
-running 1 test
+Clone the repository:
 
-==========================================================================================
-        UNIFIED STRESS TEST, CORRECTNESS VERIFICATION & BENCHMARK SUITE                   
-==========================================================================================
+```bash
+git clone https://github.com/KrishnaAdityaSrivastava/Rust-Database.git
+cd Rust-Database
+```
 
---- 1. CORRECTNESS VERIFICATION RESULTS ---
-Standalone Engine Correctness (20,000 Ops):  PASSED [100% Data Match]
-1-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-3-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-5-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
+Build in release mode:
 
---- 2. BENCHMARK METRICS SUMMARY TABLE ---
-Configuration          | Throughput (ops/s) | p50 Latency  | p95 Latency  | p99 Latency 
-------------------------------------------------------------------------------------------
-Standalone SET (20k)   | 4839.09         | 7.487µs      | 11.954µs     | 22.384µs    
-Standalone GET (20k)   | 113765.06       | 7.988µs      | 12.457µs     | 18.51µs     
-1-Node Raft (10k)      | 9321.01         | 7.782µs      | 12.797µs     | 23.791µs    
-3-Node Raft (10k)      | 3127.64         | 23.2µs       | 38.335µs     | 209.164µs   
-5-Node Raft (10k)      | 1876.03         | 38.955µs     | 62.827µs     | 515.48µs    
+```bash
+cargo build --release
+```
 
---- 3. RESOURCE FOOTPRINT & COMPACTION OVERHEAD ---
-Process Memory (RSS):    10.90 MB
-On-Disk Storage Size:    965.74 KB
-Compactions Triggered:   25 passes
-Total Compaction Time:   3.732311s
-test run_unified_stress_correctness_and_benchmarks ... ok
+Run the test suite:
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.04s
+```bash
+cargo test --release
+```
 
-[ perf record: Woken up 1749 times to write data ]
-[ perf record: Captured and wrote 437.401 MB perf.data (55978 samples) ]
+Run the unified benchmark:
 
+```bash
+cargo test --test unified_suite --release -- --nocapture
+```
 
+---
 
+# Project Structure
 
+```text
+src/
+├── database/
+├── wal/
+├── sstable/
+│   ├── format
+│   ├── index
+│   ├── reader
+│   └── writer
+├── compaction/
+└── raft/
 
+tests/
+└── unified_suite.rs
 
+Cargo.toml
+Cargo.lock
+```
 
+---
 
- sudo perf stat \
-  -e cycles,instructions,context-switches,cpu-migrations,page-faults,minor-faults,major-faults \
-  ./target/release/deps/unified_suite-9f095a716cb6b1fa --nocapture
+# Design Goal
 
-running 1 test
+The project is primarily an exploration of what happens underneath a database API.
 
-==========================================================================================
-        UNIFIED STRESS TEST, CORRECTNESS VERIFICATION & BENCHMARK SUITE                   
-==========================================================================================
+It combines storage-engine design, operating-system I/O, concurrency, networking, and distributed consensus in one system:
 
---- 1. CORRECTNESS VERIFICATION RESULTS ---
-Standalone Engine Correctness (20,000 Ops):  PASSED [100% Data Match]
-1-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-3-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-5-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
+```text
+Key-Value API
+      │
+      ▼
+Storage Engine
+      │
+      ├── WAL
+      ├── MemTable
+      ├── SSTables
+      └── Compaction
+      │
+      ▼
+Linux I/O
 
---- 2. BENCHMARK METRICS SUMMARY TABLE ---
-Configuration          | Throughput (ops/s) | p50 Latency  | p95 Latency  | p99 Latency 
-------------------------------------------------------------------------------------------
-Standalone SET (20k)   | 5010.49         | 7.448µs      | 12.203µs     | 22.251µs    
-Standalone GET (20k)   | 119647.38       | 7.765µs      | 9.241µs      | 16.316µs    
-1-Node Raft (10k)      | 9829.18         | 7.679µs      | 12.192µs     | 21.267µs    
-3-Node Raft (10k)      | 3246.18         | 23.014µs     | 33.254µs     | 195.697µs   
-5-Node Raft (10k)      | 1962.30         | 38.311µs     | 55.451µs     | 728.238µs   
+          +
 
---- 3. RESOURCE FOOTPRINT & COMPACTION OVERHEAD ---
-Process Memory (RSS):    6.77 MB
-On-Disk Storage Size:    965.74 KB
-Compactions Triggered:   25 passes
-Total Compaction Time:   3.591763s
-test run_unified_stress_correctness_and_benchmarks ... ok
+      Raft
+       │
+       ▼
+     TCP
+       │
+       ▼
+     Tokio
+```
 
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.47s
+Rather than treating performance as a single throughput number, the project uses profiling to understand where CPU time, memory, syscalls, and I/O are actually being spent.
 
+---
 
- Performance counter stats for './target/release/deps/unified_suite-9f095a716cb6b1fa --nocapture':
+# Limitations
 
-    33,444,990,943      cycles                                                                
-    29,154,448,839      instructions                     #    0.87  insn per cycle            
-               161      context-switches                                                      
-                 9      cpu-migrations                                                        
-            13,527      page-faults                                                           
-            13,525      minor-faults                                                          
-                 0      major-faults                                                          
+This is an experimental systems project rather than a production database. Durability semantics, failure handling, compaction, networking, and benchmarking are still being refined.
 
-      13.474014531 seconds time elapsed
+The current multi-node benchmarks run several Raft nodes locally. They validate the replication and networking architecture, but do not represent the behavior of nodes communicating across a real network.
 
-       6.665508000 seconds user
-       6.801539000 seconds sys
+---
 
+# License
 
-krishna@mx:~/Coding/Rust/kv-store
-$ sudo perf record -g --call-graph dwarf \
-  ./target/release/deps/unified_suite-9f095a716cb6b1fa --nocapture
-
-running 1 test
-
-==========================================================================================
-        UNIFIED STRESS TEST, CORRECTNESS VERIFICATION & BENCHMARK SUITE                   
-==========================================================================================
-
---- 1. CORRECTNESS VERIFICATION RESULTS ---
-Standalone Engine Correctness (20,000 Ops):  PASSED [100% Data Match]
-1-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-3-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-5-Node Raft Cluster Correctness (10,000 Ops): PASSED [100% Data Match]
-
---- 2. BENCHMARK METRICS SUMMARY TABLE ---
-Configuration          | Throughput (ops/s) | p50 Latency  | p95 Latency  | p99 Latency 
-------------------------------------------------------------------------------------------
-Standalone SET (20k)   | 4810.78         | 7.503µs      | 11.969µs     | 22.98µs     
-Standalone GET (20k)   | 111091.04       | 7.859µs      | 12.986µs     | 21.092µs    
-1-Node Raft (10k)      | 9308.63         | 7.745µs      | 12.024µs     | 21.855µs    
-3-Node Raft (10k)      | 3121.03         | 23.356µs     | 39.248µs     | 244.423µs   
-5-Node Raft (10k)      | 1882.33         | 41.505µs     | 65.202µs     | 853.316µs   
-
---- 3. RESOURCE FOOTPRINT & COMPACTION OVERHEAD ---
-Process Memory (RSS):    10.55 MB
-On-Disk Storage Size:    965.74 KB
-Compactions Triggered:   25 passes
-Total Compaction Time:   3.750094s
-test run_unified_stress_correctness_and_benchmarks ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.06s
-
-[ perf record: Woken up 1750 times to write data ]
-[ perf record: Captured and wrote 437.707 MB perf.data (56087 samples) ]
+MIT License.

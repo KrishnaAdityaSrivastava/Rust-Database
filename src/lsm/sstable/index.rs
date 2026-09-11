@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::io::{self, Read, Seek};
 
 pub struct IndexEntry {
@@ -37,7 +36,7 @@ impl Index {
     }
 }
 
-pub fn read_index(file: &mut File, index_len: u64, entry_count: u64) -> io::Result<Index> {
+pub fn read_index<R: std::io::Read + std::io::Seek>( file: &mut R, index_len: u64, entry_count: u64) -> io::Result<Index> {
     let start = file.stream_position()?;
 
     let end = start

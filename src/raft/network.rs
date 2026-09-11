@@ -34,10 +34,6 @@ impl Network {
         let local_id = self.local_id;
         let senders_ref = self.active_senders.clone();
 
-        // ------------------------------------------------------------
-        // 1. NODE PROCESSING TASK (with tick loop)
-        // ------------------------------------------------------------
-
         tokio::spawn(async move {
             let mut tick_interval = tokio::time::interval(Duration::from_millis(50));
 
@@ -87,9 +83,6 @@ impl Network {
             }
         });
 
-        // ------------------------------------------------------------
-        // 2. TCP LISTENER TASK
-        // ------------------------------------------------------------
 
         let acceptor_addr = self.local_addr.clone();
         let acceptor_senders = self.active_senders.clone();
@@ -132,10 +125,6 @@ impl Network {
             }
         });
 
-        // ------------------------------------------------------------
-        // 3. RECONNECT TASK
-        // ------------------------------------------------------------
-
         let reconnect_senders = self.active_senders.clone();
         let reconnect_peers = self.peers.clone();
         let reconnect_node_tx = node_tx.clone();
@@ -143,19 +132,7 @@ impl Network {
         tokio::spawn(async move {
             loop {
                 for (peer_id, peer_addr) in &reconnect_peers {
-                    /*
-                     * Only the node with the HIGHER ID initiates
-                     * the TCP connection.
-                     *
-                     * Example:
-                     *
-                     * Node 2 <---- Node 3
-                     *
-                     * Node 3 initiates.
-                     * Node 2 accepts.
-                     *
-                     * The TCP connection is still bidirectional.
-                     */
+                    
                     if local_id.id <= peer_id.id {
                         continue;
                     }
@@ -191,10 +168,6 @@ impl Network {
 
         node_tx
     }
-
-    // ================================================================
-    // INCOMING CONNECTION
-    // ================================================================
 
     async fn handle_incoming_connection(
         local_id: NodeId,
@@ -233,10 +206,6 @@ impl Network {
         Self::spawn_connection_tasks(peer_id, stream, active_senders, node_tx);
     }
 
-    // ================================================================
-    // OUTGOING CONNECTION
-    // ================================================================
-
     async fn handle_outgoing_connection(
         local_id: NodeId,
         peer_id: NodeId,
@@ -244,9 +213,6 @@ impl Network {
         active_senders: Arc<RwLock<HashMap<NodeId, UnboundedSender<Message>>>>,
         node_tx: UnboundedSender<Message>,
     ) {
-        /*
-         * Send our NodeId as the handshake.
-         */
         if let Err(err) = stream.write_all(&local_id.id.to_be_bytes()).await {
             eprintln!(
                 "Node {} failed handshake with Node {}: {}",
@@ -256,12 +222,6 @@ impl Network {
             return;
         }
 
-        /*
-         * Because only the higher NodeId initiates,
-         * there should normally never be an existing connection.
-         *
-         * Still check to protect against races/reconnects.
-         */
         {
             let senders = active_senders.read().unwrap();
 
@@ -280,10 +240,6 @@ impl Network {
         Self::spawn_connection_tasks(peer_id, stream, active_senders, node_tx);
     }
 
-    // ================================================================
-    // CONNECTION TASKS
-    // ================================================================
-
     fn spawn_connection_tasks(
         peer_id: NodeId,
         stream: TcpStream,
@@ -292,9 +248,6 @@ impl Network {
     ) {
         let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<Message>();
 
-        /*
-         * Register the writer channel.
-         */
         {
             let mut senders = active_senders.write().unwrap();
 
@@ -352,10 +305,6 @@ impl Network {
                 }
             }
         });
-
-        // ------------------------------------------------------------
-        // READER TASK
-        // ------------------------------------------------------------
 
         let reader_senders = active_senders.clone();
 

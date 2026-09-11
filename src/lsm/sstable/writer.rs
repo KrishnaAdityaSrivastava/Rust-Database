@@ -1,8 +1,8 @@
 use std::fs::File;
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use super::format::{Entry, HEADER_SIZE, Header, write_header, write_record};
+use super::format::{write_header, write_record, Entry, Header, HEADER_SIZE};
 use super::index::Index;
 
 pub fn create(path: &Path) -> io::Result<()> {
@@ -19,15 +19,15 @@ pub fn create(path: &Path) -> io::Result<()> {
 
     Ok(())
 }
+
 /// Normal SSTable writer used when flushing the MemTable.
 pub fn write(path: &Path, entries: &[(&String, &Entry)]) -> io::Result<Index> {
-    let mut file = File::create(path)?;
+    let file = File::create(path)?;
+    let mut file = BufWriter::with_capacity(256 * 1024, file);
 
     let mut index = Index::new();
     let mut offset = HEADER_SIZE;
 
-    // Placeholder header. It is rewritten after all records and
-    // the index have been written.
     write_header(
         &mut file,
         &Header {
@@ -68,6 +68,9 @@ pub fn write(path: &Path, entries: &[(&String, &Entry)]) -> io::Result<Index> {
     let index_len = offset - index_offset;
     let entry_count = index.len() as u64;
 
+    // Flush buffered data before seeking back to rewrite the header.
+    file.flush()?;
+
     file.seek(SeekFrom::Start(0))?;
 
     write_header(
@@ -79,25 +82,24 @@ pub fn write(path: &Path, entries: &[(&String, &Entry)]) -> io::Result<Index> {
         },
     )?;
 
-    file.sync_all()?;
+    // Ensure the final header and all buffered data reach the OS.
+    file.flush()?;
+    file.get_ref().sync_all()?;
 
     Ok(index)
 }
 
 /// Streaming SSTable writer used by compaction.
-///
-/// Records are written directly to disk in sorted order.
-/// The index is still kept in memory because the current SSTable
-/// format stores the index at the end of the file.
 pub struct StreamingWriter {
-    file: File,
+    file: BufWriter<File>,
     index: Index,
     offset: u64,
 }
 
 impl StreamingWriter {
     pub fn create(path: &Path) -> io::Result<Self> {
-        let mut file = File::create_new(path)?;
+        let file = File::create(path)?;
+        let mut file = BufWriter::with_capacity(256 * 1024, file);
 
         write_header(
             &mut file,
@@ -116,7 +118,6 @@ impl StreamingWriter {
     }
 
     pub fn write_entry(&mut self, key: &str, entry: &Entry) -> io::Result<()> {
-        // SSTable records must be strictly sorted.
         if let Some(last) = self.index.iter().last() {
             if last.key.as_str() >= key {
                 return Err(io::Error::new(
@@ -143,7 +144,6 @@ impl StreamingWriter {
     pub fn finish(mut self) -> io::Result<Index> {
         let index_offset = self.offset;
 
-        // Write the index at the end of the file.
         for entry in self.index.iter() {
             let key_bytes = entry.key.as_bytes();
 
@@ -160,9 +160,12 @@ impl StreamingWriter {
         let index_len = self.offset - index_offset;
         let entry_count = self.index.len() as u64;
 
-        // Rewrite the header with the final index metadata.
+        // Important: flush before seeking.
+        self.file.flush()?;
+
         self.file.seek(SeekFrom::Start(0))?;
 
+        // Write through BufWriter, not get_mut().
         write_header(
             &mut self.file,
             &Header {
@@ -172,7 +175,11 @@ impl StreamingWriter {
             },
         )?;
 
-        self.file.sync_all()?;
+        // Make sure header + index + records are all flushed.
+        self.file.flush()?;
+
+        // sync_all operates on the underlying File.
+        self.file.get_ref().sync_all()?;
 
         Ok(self.index)
     }

@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, BufReader, Seek, SeekFrom};
 
 use std::path::Path;
 
@@ -12,46 +12,46 @@ pub struct Logger {
 
 impl Logger {
     pub fn new(file_name: impl AsRef<Path>) -> io::Result<Self> {
+        let path = file_name.as_ref();
+
         let mut file = OpenOptions::new()
             .create(true)
             .read(true)
-            .write(true)
             .append(true)
-            .open(file_name)?;
+            .open(path)?;
+
+        let mut reader = BufReader::with_capacity(256 * 1024, file);
 
         let mut len = 0;
 
-        // Start reading from the beginning of the WAL.
-        file.seek(SeekFrom::Start(0))?;
-
         loop {
-            let record_start = file.stream_position()?;
+            let record_start = reader.stream_position()?;
 
-            match LogRecord::read_from(&mut file) {
+            match LogRecord::read_from(&mut reader) {
                 Ok(Some(record)) => {
-                    // The next record ID should be one greater
-                    // than the largest valid record ID.
                     len = record.id() + 1;
                 }
 
-                Ok(None) => {
-                    break;
-                }
+                Ok(None) => break,
 
                 Err(e) => {
                     eprintln!("WAL corruption detected at byte {}: {}", record_start, e);
 
-                    // Remove the corrupt record and everything after it.
-                    file.set_len(record_start)?;
+                    // Recover the underlying file and truncate the
+                    // corrupt record and everything after it.
+                    let mut file = reader.into_inner();
 
-                    break;
+                    file.set_len(record_start)?;
+                    file.seek(SeekFrom::End(0))?;
+
+                    return Ok(Logger { file, len });
                 }
             }
         }
 
-        // Always leave the cursor at the end so the logger
-        // is ready for appending new records.
-        file.seek(SeekFrom::End(0))?;
+        // Recover the underlying File. No seek-to-end is required for
+        // correctness because the file was opened with O_APPEND.
+        file = reader.into_inner();
 
         Ok(Logger { file, len })
     }
@@ -77,41 +77,30 @@ impl Logger {
         Ok(())
     }
 
-    /// Read all valid records from the WAL.
-    ///
-    /// If a corrupt/incomplete record is encountered, it is removed
-    /// together with everything after it.
     pub fn read_records(&mut self) -> io::Result<Vec<LogRecord>> {
-        let mut records = Vec::new();
-
-        // Start from the beginning of the WAL.
         self.file.seek(SeekFrom::Start(0))?;
 
-        loop {
-            let record_start = self.file.stream_position()?;
+        let mut reader = BufReader::with_capacity(256 * 1024, &self.file);
+        let mut records = Vec::new();
 
-            match LogRecord::read_from(&mut self.file) {
+        loop {
+            let record_start = reader.stream_position()?;
+
+            match LogRecord::read_from(&mut reader) {
                 Ok(Some(record)) => {
                     records.push(record);
                 }
 
-                Ok(None) => {
-                    break;
-                }
+                Ok(None) => break,
 
                 Err(e) => {
                     eprintln!("WAL corruption detected at byte {}: {}", record_start, e);
 
-                    // Truncate the invalid record and everything after it.
                     self.file.set_len(record_start)?;
-
                     break;
                 }
             }
         }
-
-        // Return the logger to append mode.
-        self.file.seek(SeekFrom::End(0))?;
 
         Ok(records)
     }
@@ -119,7 +108,6 @@ impl Logger {
     pub fn truncate(&mut self) -> io::Result<()> {
         self.file.set_len(0)?;
         self.file.sync_all()?;
-
         self.len = 0;
 
         Ok(())

@@ -1,30 +1,30 @@
 use std::fs::File;
-use std::io::{self, Seek, SeekFrom};
+use std::io::{self, BufReader, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Mutex;
 
 use super::format::{Entry, HEADER_SIZE, read_header, read_record};
 use super::index::{Index, read_index};
 
 pub struct SequentialReader {
-    file: File,
-    end: u64,
+    file: BufReader<File>,
     entries_read: u64,
     entry_count: u64,
 }
 
 impl SequentialReader {
     pub fn open(path: &Path) -> io::Result<Self> {
-        let mut file = File::open(path)?;
+        let file = File::open(path)?;
+        let mut file = BufReader::with_capacity(256 * 1024, file);
 
         let header = read_header(&mut file)?;
 
-        validate_header(&file, &header)?;
+        validate_header(file.get_ref(), &header)?;
 
         file.seek(SeekFrom::Start(HEADER_SIZE))?;
 
         Ok(Self {
             file,
-            end: header.index_offset,
             entries_read: 0,
             entry_count: header.entry_count,
         })
@@ -35,17 +35,11 @@ impl SequentialReader {
             return Ok(None);
         }
 
-        let position = self.file.stream_position()?;
-
-        if position >= self.end {
-            return Err(io::Error::new(
+        let record = read_record(&mut self.file)?.ok_or_else(|| {
+            io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "SSTable data ended before entry_count",
-            ));
-        }
-
-        let record = read_record(&mut self.file)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of SSTable")
+            )
         })?;
 
         self.entries_read += 1;
@@ -55,28 +49,29 @@ impl SequentialReader {
 }
 
 pub fn load_index(path: &Path) -> io::Result<Index> {
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
+    let mut file = BufReader::with_capacity(256 * 1024, file);
 
     let header = read_header(&mut file)?;
 
-    validate_header(&file, &header)?;
+    validate_header(file.get_ref(), &header)?;
 
     file.seek(SeekFrom::Start(header.index_offset))?;
 
     read_index(&mut file, header.index_len, header.entry_count)
 }
 
-pub fn read_entry(path: &Path, index: &Index, key: &str) -> io::Result<Option<Entry>> {
+pub fn read_entry(file: &Mutex<File>, index: &Index, key: &str) -> io::Result<Option<Entry>> {
     let offset = match index.find(key) {
         Some(offset) => offset,
         None => return Ok(None),
     };
 
-    let mut file = File::open(path)?;
+    let mut file = file.lock().unwrap();
 
     file.seek(SeekFrom::Start(offset))?;
 
-    match read_record(&mut file)? {
+    match read_record(&mut *file)? {
         Some((_, entry)) => Ok(Some(entry)),
         None => Ok(None),
     }

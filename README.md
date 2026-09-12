@@ -4,7 +4,7 @@
 
 **A key-value storage engine built from scratch in Rust with LSM-based storage and Raft replication.**
 
-**Rust · LSM Trees · WAL · SSTables · Compaction · Tokio · TCP · Raft · Linux `perf`**
+**Rust · LSM Trees · WAL · SSTables · Compaction · Tokio · TCP · Raft**
 
 </div>
 
@@ -137,17 +137,6 @@ The suite covers:
 | Raft fault tolerance | Elections, failures, partitions, conflicts, message faults     |
 | TCP networking       | Serialization, cluster startup, election, network behavior     |
 | System stress        | Standalone + 1/3/5-node workloads, correctness and performance |
-
-Current test status:
-
-```text
-LSM correctness              4/4   PASS
-Raft fault tolerance        13/13  PASS
-TCP networking                3/3  PASS
-Unified system suite          1/1  PASS
-──────────────────────────────────────
-All automated suites          PASS
-```
 
 The unified stress suite additionally verifies end-to-end data consistency across standalone and multi-node Raft configurations.
 

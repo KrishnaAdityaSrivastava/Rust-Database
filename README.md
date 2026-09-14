@@ -30,31 +30,51 @@ The project focuses on storage systems, networking, concurrency, distributed con
 
 ## Architecture
 
-```text
-                         Client
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │     Raft    │
-                    │  (optional) │
-                    └──────┬──────┘
-                           │
-                           ▼
-                    ┌─────────────┐
-                    │   Database  │
-                    └──────┬──────┘
-                           │
-                 ┌─────────┴─────────┐
-                 ▼                   ▼
-              MemTable               WAL
-                 │
-                 ▼
-              SSTables
-                 │
-                 ▼
-             Compaction
-```
-
+                         ┌───────────────────┐
+                         │      CLIENT       │
+                         └─────────┬─────────┘
+                                   │
+                    ┌──────────────┴──────────────┐
+                    │                             │
+             Standalone Mode              Replicated Mode
+                    │                             │
+                    │                    ┌────────▼────────┐
+                    │                    │   RAFT CLUSTER  │
+                    │                    │                  │
+                    │                    │ Leader ↔ Follower│
+                    │                    │    ↕       ↕     │
+                    │                    │ Follower ↔ ...  │
+                    │                    │                  │
+                    │                    │ Tokio Async TCP  │
+                    │                    └────────┬─────────┘
+                    │                             │
+                    └──────────────┬──────────────┘
+                                   │
+                            ┌──────▼──────┐
+                            │   DATABASE  │
+                            └──────┬──────┘
+                                   │
+                     ┌─────────────┴─────────────┐
+                     │                           │
+               ┌─────▼─────┐               ┌─────▼─────┐
+               │    WAL    │               │  MemTable │
+               │ Persistent│               │ In-Memory │
+               └─────┬─────┘               └─────┬─────┘
+                     │                             │
+                     │ Recovery                    │ Flush
+                     │                             │
+                     │                       ┌─────▼─────┐
+                     │                       │  SSTables  │
+                     │                       │ Immutable  │
+                     │                       │ + Index    │
+                     │                       └─────┬─────┘
+                     │                             │
+                     │                       ┌─────▼──────┐
+                     └──────────────────────►│ Compaction │
+                                             │ Heap Merge │
+                                             │ Streaming  │
+                                             └────────────┘
+                                             
 The storage engine can run standalone or as the replicated state machine of a Raft node.
 
 ---

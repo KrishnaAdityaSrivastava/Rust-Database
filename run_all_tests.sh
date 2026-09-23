@@ -15,6 +15,7 @@ echo -e "${BOLD}${CYAN}=========================================================
 echo ""
 
 export RUSTFLAGS="-C target-cpu=native"
+#export RAFT_LOG=1
 
 PASS_COUNT=0
 TOTAL_SUITES=4

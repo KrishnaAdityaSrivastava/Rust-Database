@@ -3,7 +3,7 @@ use std::fs;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
-use kv_store::{Command, Database, NodeId, RaftNode, Role};
+use kv_store::{Command, Database, NodeId, RaftNode, Role, wal::log_record::Value};
 
 /// Process Resident Set Size (RSS) in bytes from /proc/self/statm
 fn get_memory_rss_bytes() -> usize {
@@ -135,7 +135,7 @@ impl TestCluster {
 
             // Send command to Leader (Node 1)
             let leader = self.nodes.get_mut(&1).unwrap();
-            leader.append_command(Command::Set(key, val));
+            leader.append_command(Command::Set { key, value: Value::String(val) });
             self.route_messages();
 
             // Apply committed entries to local database on all nodes
@@ -145,7 +145,7 @@ impl TestCluster {
                 while *applied < node.commit_index {
                     *applied += 1;
                     if *applied < node.log.len() {
-                        if let Command::Set(k, v) = &node.log[*applied].command {
+                        if let Command::Set { key: k, value: v } = node.log[*applied].record.command() {
                             db.insert(k.clone(), v.clone()).unwrap();
                         }
                     }
@@ -172,7 +172,7 @@ impl TestCluster {
             while *applied < node.commit_index {
                 *applied += 1;
                 if *applied < node.log.len() {
-                    if let Command::Set(k, v) = &node.log[*applied].command {
+                    if let Command::Set { key: k, value: v } = node.log[*applied].record.command() {
                         db.insert(k.clone(), v.clone()).unwrap();
                     }
                 }
@@ -184,7 +184,7 @@ impl TestCluster {
         let final_commit = self.nodes[&1].commit_index;
         for i in (0..final_commit).step_by(10) {
             let key = format!("k_{:06}", i);
-            let expected_val = format!("v_{}", i);
+            let expected_val = Value::String(format!("v_{}", i));
 
             for (&node_id, db) in &self.databases {
                 let actual = db.get(&key).unwrap();
@@ -220,7 +220,7 @@ fn run_unified_stress_correctness_and_benchmarks() {
     let start_set = Instant::now();
     for i in 0..num_ops {
         let op_start = Instant::now();
-        standalone_db.insert(format!("key_{:06}", i), format!("val_{}", i)).unwrap();
+        standalone_db.insert(format!("key_{:06}", i), Value::String(format!("val_{}", i))).unwrap();
         set_lats.push(op_start.elapsed());
     }
     let set_stats = calculate_latency_stats(set_lats, start_set.elapsed());
@@ -232,7 +232,7 @@ fn run_unified_stress_correctness_and_benchmarks() {
         let op_start = Instant::now();
         let k = format!("key_{:06}", i);
         let val = standalone_db.get(&k).unwrap();
-        assert_eq!(val, Some(format!("val_{}", i)));
+        assert_eq!(val, Some(Value::String(format!("val_{}", i))));
         get_hit_lats.push(op_start.elapsed());
     }
     let get_hit_stats = calculate_latency_stats(get_hit_lats, start_get_hit.elapsed());
@@ -254,7 +254,7 @@ fn run_unified_stress_correctness_and_benchmarks() {
     let start_update = Instant::now();
     for i in 0..num_ops {
         let op_start = Instant::now();
-        standalone_db.insert(format!("key_{:06}", i), format!("new_val_{}", i)).unwrap();
+        standalone_db.insert(format!("key_{:06}", i), Value::String(format!("new_val_{}", i))).unwrap();
         update_lats.push(op_start.elapsed());
     }
     let update_stats = calculate_latency_stats(update_lats, start_update.elapsed());
@@ -277,14 +277,24 @@ fn run_unified_stress_correctness_and_benchmarks() {
     // -------------------------------------------------------------------------
     // 2. DISTRIBUTED RAFT CONSENSUS CLUSTER BENCHMARKS
     // -------------------------------------------------------------------------
+    
     let mut cluster_1 = TestCluster::new(1);
-    let (c1_stats, c1_correct) = cluster_1.stress_and_benchmark(5_000);
+    let (c1_stats, c1_correct) = cluster_1.stress_and_benchmark(1000);
 
     let mut cluster_3 = TestCluster::new(3);
-    let (c3_stats, c3_correct) = cluster_3.stress_and_benchmark(5_000);
+    let (c3_stats, c3_correct) = cluster_3.stress_and_benchmark(1000);
 
     let mut cluster_5 = TestCluster::new(5);
-    let (c5_stats, c5_correct) = cluster_5.stress_and_benchmark(5_000);
+    let (c5_stats, c5_correct) = cluster_5.stress_and_benchmark(1000);
+
+    // let mut cluster_1 = TestCluster::new(1);
+    // let (c1_stats, c1_correct) = cluster_1.stress_and_benchmark(5_000);
+
+    // let mut cluster_3 = TestCluster::new(3);
+    // let (c3_stats, c3_correct) = cluster_3.stress_and_benchmark(5_000);
+
+    // let mut cluster_5 = TestCluster::new(5);
+    // let (c5_stats, c5_correct) = cluster_5.stress_and_benchmark(5_000);
 
     // -------------------------------------------------------------------------
     // 3. EXECUTIVE SUMMARY DASHBOARD

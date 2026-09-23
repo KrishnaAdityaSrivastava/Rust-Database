@@ -1,6 +1,6 @@
-use crate::raft::RaftNode;
-
-use super::node::{Command, LogEntry, NodeId};
+use crate::{raft::RaftNode};
+use crate::wal::log_record::Command;
+use super::node::{LogEntry, NodeId};
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

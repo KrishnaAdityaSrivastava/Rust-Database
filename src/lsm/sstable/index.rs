@@ -1,4 +1,4 @@
-use std::io::{self, Read, Seek};
+use std::io;
 
 pub struct IndexEntry {
     pub key: String,

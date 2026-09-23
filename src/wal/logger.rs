@@ -3,7 +3,7 @@ use std::io::{self, BufReader, Seek, SeekFrom};
 
 use std::path::Path;
 
-use super::log_record::{Command, DataType, LogRecord};
+use super::log_record::{Command, LogRecord};
 
 pub struct Logger {
     file: File,
@@ -56,20 +56,8 @@ impl Logger {
         Ok(Logger { file, len })
     }
 
-    pub fn log(
-        &mut self,
-        command: Command,
-        data_type: DataType,
-        key: &str,
-        val: &str,
-    ) -> io::Result<()> {
-        let value = match command {
-            Command::Set => Some(val.to_owned()),
-            Command::Delete => None,
-        };
-
-        let record = LogRecord::new(self.len, command, data_type, key.to_owned(), value);
-
+    pub fn log(&mut self,command: Command) -> io::Result<()> {
+        let record = LogRecord::new(self.len, command);
         record.write_to(&mut self.file)?;
 
         self.len += 1;

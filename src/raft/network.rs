@@ -83,7 +83,6 @@ impl Network {
             }
         });
 
-
         let acceptor_addr = self.local_addr.clone();
         let acceptor_senders = self.active_senders.clone();
         let acceptor_node_tx = node_tx.clone();
@@ -132,7 +131,6 @@ impl Network {
         tokio::spawn(async move {
             loop {
                 for (peer_id, peer_addr) in &reconnect_peers {
-                    
                     if local_id.id <= peer_id.id {
                         continue;
                     }
@@ -362,4 +360,3 @@ impl Network {
         });
     }
 }
-

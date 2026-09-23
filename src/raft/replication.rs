@@ -1,6 +1,8 @@
+use crate::wal::log_record::{Command, LogRecord};
+
 use super::{
     message::{AppendEntries, AppendEntriesResponse, Message},
-    node::{Command, LogEntry, NodeId, RaftNode, Role},
+    node::{LogEntry, NodeId, RaftNode, Role},
 };
 
 impl RaftNode {
@@ -179,7 +181,7 @@ impl RaftNode {
 
         self.log.push(LogEntry {
             term: self.current_term,
-            command,
+            record: LogRecord::new(0, command),
         });
 
         if self.peers.is_empty() {
@@ -197,15 +199,15 @@ impl RaftNode {
         while self.last_applied < self.commit_index {
             self.last_applied += 1;
 
-            let command = self.log[self.last_applied].command.clone();
+            let command = self.log[self.last_applied].record.command.clone();
 
             if super::is_log_enabled() {
                 match command {
-                    Command::Set(key, value) => {
-                        println!("Node {} applied SET {} = {}", self.id.id, key, value);
+                    Command::Set { key, value, .. } => {
+                        println!("Node {} applied SET {} = {:?}", self.id.id, key, value);
                     }
 
-                    Command::Delete(key) => {
+                    Command::Delete { key, .. } => {
                         println!("Node {} applied DELETE {}", self.id.id, key);
                     }
                 }

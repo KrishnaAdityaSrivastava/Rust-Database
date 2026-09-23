@@ -1,7 +1,8 @@
 use std::io;
-
-use kv_store::database::{Database};
 use std::sync::Arc;
+
+use kv_store::database::Database;
+use kv_store::wal::log_record::Value;
 
 fn main() -> io::Result<()> {
     // Flush memtable after 2 entries.
@@ -11,23 +12,29 @@ fn main() -> io::Result<()> {
     let db2 = Arc::clone(&db);
 
     std::thread::spawn(move || {
-        db2.insert("name".into(), "krishna".into()).unwrap();
+        db2.insert("name".into(), Value::String("krishna".into()))
+            .unwrap();
     })
     .join()
     .unwrap();
 
     println!("--- INSERTING ---");
 
-    db.insert("name".to_string(), "Bob".to_string())?;
-    db.insert("age".to_string(), "19".to_string())?;
+    db.insert("name".to_string(), Value::String("Bob".to_string()))?;
+
+    db.insert("age".to_string(), Value::Int(19))?;
+
     // Flush #1 happens here.
 
-    db.insert("cat".to_string(), "Alice".to_string())?;
-    db.insert("cot".to_string(), "Charlie".to_string())?;
+    db.insert("cat".to_string(), Value::String("Alice".to_string()))?;
+
+    db.insert("cot".to_string(), Value::String("Charlie".to_string()))?;
+
     // Flush #2 happens here.
     // Since there are now 2 SSTables, compaction should happen.
 
-    db.insert("cash".to_string(), "100".to_string())?;
+    db.insert("cash".to_string(), Value::Int(100))?;
+
     // Still in memory.
 
     println!("\n--- INITIAL READS ---");
@@ -40,9 +47,9 @@ fn main() -> io::Result<()> {
 
     println!("\n--- OVERWRITE TEST ---");
 
-    db.insert("name".to_string(), "Krishna".to_string())?;
+    db.insert("name".to_string(), Value::String("Krishna".to_string()))?;
 
-    // This should return the newest value, not "Bob".
+    // This should return the newest value.
     print_value(&db, "name")?;
 
     println!("\n--- DELETE TEST ---");
@@ -60,7 +67,7 @@ fn main() -> io::Result<()> {
 
 fn print_value(db: &Database, key: &str) -> io::Result<()> {
     match db.get(key)? {
-        Some(value) => println!("{key}: {value}"),
+        Some(value) => println!("{key}: {:?}", value),
         None => println!("{key}: <not found>"),
     }
 

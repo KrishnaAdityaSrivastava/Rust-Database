@@ -2,8 +2,10 @@ use std::fs::File;
 use std::io::{self, BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use super::format::{write_header, write_record, Entry, Header, HEADER_SIZE};
+use super::format::{Entry, HEADER_SIZE, Header, write_header, write_record};
 use super::index::Index;
+
+const BUFFER_SIZE: usize = 256 * 1024;
 
 pub fn create(path: &Path) -> io::Result<()> {
     let mut file = File::create(path)?;
@@ -23,7 +25,7 @@ pub fn create(path: &Path) -> io::Result<()> {
 /// Normal SSTable writer used when flushing the MemTable.
 pub fn write(path: &Path, entries: &[(&String, &Entry)]) -> io::Result<Index> {
     let file = File::create(path)?;
-    let mut file = BufWriter::with_capacity(256 * 1024, file);
+    let mut file = BufWriter::with_capacity(BUFFER_SIZE, file);
 
     let mut index = Index::new();
     let mut offset = HEADER_SIZE;
@@ -40,14 +42,8 @@ pub fn write(path: &Path, entries: &[(&String, &Entry)]) -> io::Result<Index> {
     for (key, entry) in entries {
         index.add((*key).clone(), offset);
 
-        write_record(&mut file, key, entry)?;
-
-        let value_len = match entry {
-            Entry::Set(value) => value.len(),
-            Entry::Delete => 0,
-        };
-
-        offset += 9 + key.len() as u64 + value_len as u64;
+        let record_len = write_record(&mut file, key, entry)?;
+        offset += record_len;
     }
 
     let index_offset = offset;
@@ -68,9 +64,7 @@ pub fn write(path: &Path, entries: &[(&String, &Entry)]) -> io::Result<Index> {
     let index_len = offset - index_offset;
     let entry_count = index.len() as u64;
 
-    // Flush buffered data before seeking back to rewrite the header.
     file.flush()?;
-
     file.seek(SeekFrom::Start(0))?;
 
     write_header(
@@ -82,7 +76,6 @@ pub fn write(path: &Path, entries: &[(&String, &Entry)]) -> io::Result<Index> {
         },
     )?;
 
-    // Ensure the final header and all buffered data reach the OS.
     file.flush()?;
     file.get_ref().sync_all()?;
 
@@ -99,7 +92,7 @@ pub struct StreamingWriter {
 impl StreamingWriter {
     pub fn create(path: &Path) -> io::Result<Self> {
         let file = File::create(path)?;
-        let mut file = BufWriter::with_capacity(256 * 1024, file);
+        let mut file = BufWriter::with_capacity(BUFFER_SIZE, file);
 
         write_header(
             &mut file,
@@ -118,25 +111,19 @@ impl StreamingWriter {
     }
 
     pub fn write_entry(&mut self, key: &str, entry: &Entry) -> io::Result<()> {
-        if let Some(last) = self.index.iter().last() {
-            if last.key.as_str() >= key {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "SSTable entries must be sorted",
-                ));
-            }
+        if let Some(last) = self.index.iter().last()
+            && last.key.as_str() >= key
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "SSTable entries must be sorted",
+            ));
         }
 
         self.index.add(key.to_owned(), self.offset);
 
-        write_record(&mut self.file, key, entry)?;
-
-        let value_len = match entry {
-            Entry::Set(value) => value.len(),
-            Entry::Delete => 0,
-        };
-
-        self.offset += 9 + key.len() as u64 + value_len as u64;
+        let record_len = write_record(&mut self.file, key, entry)?;
+        self.offset += record_len;
 
         Ok(())
     }
@@ -160,12 +147,9 @@ impl StreamingWriter {
         let index_len = self.offset - index_offset;
         let entry_count = self.index.len() as u64;
 
-        // Important: flush before seeking.
         self.file.flush()?;
-
         self.file.seek(SeekFrom::Start(0))?;
 
-        // Write through BufWriter, not get_mut().
         write_header(
             &mut self.file,
             &Header {
@@ -175,10 +159,7 @@ impl StreamingWriter {
             },
         )?;
 
-        // Make sure header + index + records are all flushed.
         self.file.flush()?;
-
-        // sync_all operates on the underlying File.
         self.file.get_ref().sync_all()?;
 
         Ok(self.index)

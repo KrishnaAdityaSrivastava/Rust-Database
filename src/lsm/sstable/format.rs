@@ -1,15 +1,22 @@
 use std::io::{self, Read, Write};
 
+use crate::wal::{
+    log_record::{Value, DataType},
+};
+
 pub const MAGIC: &[u8; 4] = b"SST1";
 pub const VERSION: u8 = 1;
+
+// 4 magic + 1 version + 8 index_offset + 8 index_len + 8 entry_count
 pub const HEADER_SIZE: u64 = 29;
 
 #[derive(Debug)]
 pub enum Entry {
-    Set(String),
+    Set(Value),
     Delete,
 }
 
+#[derive(Debug)]
 pub struct Header {
     pub index_offset: u64,
     pub index_len: u64,
@@ -65,12 +72,13 @@ pub fn read_header<R: Read>(reader: &mut R) -> io::Result<Header> {
     })
 }
 
-pub fn write_record<W: Write>(writer: &mut W, key: &str, entry: &Entry) -> io::Result<()> {
+pub fn write_record<W: Write>(writer: &mut W, key: &str, entry: &Entry) -> io::Result<u64> {
     let key_bytes = key.as_bytes();
 
-    let (entry_type, value_bytes) = match entry {
-        Entry::Set(value) => (0u8, value.as_bytes()),
-        Entry::Delete => (1u8, &[][..]),
+    let (entry_type, value_type, value_bytes) = match entry {
+        Entry::Set(value) => (0u8, value.data_type() as u8, value.as_bytes()),
+
+        Entry::Delete => (1u8, 0u8, Vec::new()),
     };
 
     let key_len = u32::try_from(key_bytes.len())
@@ -79,46 +87,63 @@ pub fn write_record<W: Write>(writer: &mut W, key: &str, entry: &Entry) -> io::R
     let value_len = u32::try_from(value_bytes.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "value is too large"))?;
 
-    // [entry_type: 1] [key_len: 4] [value_len: 4] [key] [value]
+    // [entry_type: 1]
+    // [value_type: 1]
+    // [key_len: 4]
+    // [value_len: 4]
+    // [key]
+    // [value]
 
-    let mut header = [0u8; 9];
+    let mut header = [0u8; 10];
+    let record_len = 10 + key_bytes.len() as u64 + value_bytes.len() as u64;
 
     header[0] = entry_type;
-    header[1..5].copy_from_slice(&key_len.to_le_bytes());
-    header[5..9].copy_from_slice(&value_len.to_le_bytes());
+    header[1] = value_type;
+    header[2..6].copy_from_slice(&key_len.to_le_bytes());
+    header[6..10].copy_from_slice(&value_len.to_le_bytes());
 
     writer.write_all(&header)?;
     writer.write_all(key_bytes)?;
-    writer.write_all(value_bytes)?;
+    writer.write_all(&value_bytes)?;
 
-    Ok(())
+
+    Ok(record_len)
 }
 
 pub fn read_record<R: Read>(reader: &mut R) -> io::Result<Option<(String, Entry)>> {
-    let mut header = [0u8; 9];
+    let mut header = [0u8; 10];
 
     match reader.read_exact(&mut header) {
         Ok(()) => {}
+
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
             return Ok(None);
         }
+
         Err(error) => return Err(error),
     }
 
     let entry_type = header[0];
+    let value_type = header[1];
 
-    let key_len = u32::from_le_bytes(header[1..5].try_into().unwrap()) as usize;
+    let key_len = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
 
-    let value_len = u32::from_le_bytes(header[5..9].try_into().unwrap()) as usize;
+    let value_len = u32::from_le_bytes(header[6..10].try_into().unwrap()) as usize;
 
     let key = read_string(reader, key_len, "key")?;
 
     let entry = match entry_type {
+        // Set
         0 => {
-            let value = read_string(reader, value_len, "value")?;
-            Entry::Set(value)
+            let mut value_bytes = vec![0u8; value_len];
+            reader.read_exact(&mut value_bytes)?;
+
+            let data_type = DataType::from_u8(value_type)?;
+
+            Entry::Set(Value::from_bytes(data_type, value_bytes)?)
         }
 
+        // Delete
         1 => {
             if value_len != 0 {
                 return Err(io::Error::new(

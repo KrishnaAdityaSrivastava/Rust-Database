@@ -4,6 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::wal::log_record::{Command, LogRecord, Value};
+
 use super::message::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -18,17 +20,17 @@ pub enum Role {
     Leader,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogEntry {
     pub term: u64,
-    pub command: Command,
+    pub record: LogRecord,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Command {
-    Set(String, String),
-    Delete(String),
-}
+// #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// pub enum Command {
+//     Set(String, String),
+//     Delete(String),
+// }
 
 pub struct RaftNode {
     pub id: NodeId,
@@ -70,7 +72,13 @@ impl RaftNode {
 
             log: vec![LogEntry {
                 term: 0,
-                command: Command::Set(String::new(), String::new()),
+                record: LogRecord::new(
+                    0,
+                    Command::Set {
+                        key: String::new(),
+                        value: Value::String(String::new()),
+                    },
+                ),
             }],
 
             commit_index: 0,

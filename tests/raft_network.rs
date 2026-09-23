@@ -1,4 +1,5 @@
-use kv_store::raft::{Command, Message, Network, NodeId, RaftNode};
+use kv_store::raft::{Message, Network, NodeId, RaftNode};
+use kv_store::wal::log_record::{Command, LogRecord, Value};
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -41,10 +42,10 @@ async fn test_tcp_cluster_startup_and_election() {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // Send a command to Node 1 (who should now be leader)
-    tx1.send(Message::ClientCommand(Command::Set(
-        "key1".to_string(),
-        "value1".to_string(),
-    )))
+    tx1.send(Message::ClientCommand(Command::Set {
+        key: "key1".to_string(),
+        value: Value::String("value1".to_string()),
+    }))
     .unwrap();
 
     // Allow time for AppendEntries and AppendEntriesResponse
@@ -89,7 +90,13 @@ fn test_message_serialization() {
         prev_log_term: 0,
         entries: vec![LogEntry {
             term: 1,
-            command: Command::Set("x".to_string(), "y".to_string()),
+            record: LogRecord::new(
+                1,
+                Command::Set {
+                    key: "x".to_string(),
+                    value: Value::String("y".to_string()),
+                },
+            ),
         }],
         leader_commit: 1,
     });
@@ -146,10 +153,10 @@ async fn test_tcp_network_cluster_throughput() {
     let start = std::time::Instant::now();
 
     for i in 0..num_ops {
-        let _ = tx1.send(Message::ClientCommand(Command::Set(
-            format!("key_{:05}", i),
-            format!("val_{}", i),
-        )));
+        let _ = tx1.send(Message::ClientCommand(Command::Set {
+            key: format!("key_{:05}", i),
+            value: Value::String(format!("val_{}", i)),
+        }));
     }
 
     // Allow messages to transmit and commit

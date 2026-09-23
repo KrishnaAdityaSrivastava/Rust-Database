@@ -10,9 +10,10 @@ use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::lsm::sstable::{Entry, SSTable};
+use crate::wal::log_record::Value;
 use crate::wal::{
     Logger,
-    log_record::{Command, DataType},
+    log_record::Command,
 };
 
 pub struct Database {
@@ -95,10 +96,10 @@ impl Database {
         (count, std::time::Duration::from_micros(micros))
     }
 
-    pub fn insert(&self, key: String, value: String) -> io::Result<()> {
+    pub fn insert(&self, key: String, value: Value) -> io::Result<()> {
         {
             let mut log = self.log.lock().unwrap();
-            log.log(Command::Set, DataType::String, &key, &value)?;
+            log.log(Command::Set { key:     key.clone(), value: value.clone()})?;
         }
 
         {
@@ -115,7 +116,7 @@ impl Database {
     pub fn delete(&self, key: &str) -> io::Result<()> {
         {
             let mut log = self.log.lock().unwrap();
-            log.log(Command::Delete, DataType::String, key, "")?;
+            log.log(Command::Delete { key:key.to_string() })?;
         }
 
         {
@@ -129,7 +130,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get(&self, key: &str) -> io::Result<Option<String>> {
+    pub fn get(&self, key: &str) -> io::Result<Option<Value>> {
         {
             let data = self.data.read().unwrap();
             if let Some(entry) = data.get(key) {

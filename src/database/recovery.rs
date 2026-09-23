@@ -57,26 +57,25 @@ impl Database {
     }
 
     pub(crate) fn recover(&mut self) -> io::Result<()> {
-        let records = {
-            let mut log = self.log.lock().unwrap();
-            log.read_records()?
-        };
+    let records = {
+        let mut log = self.log.lock().unwrap();
+        log.read_records()?
+    };
 
-        let mut data = self.data.write().unwrap();
+    let mut data = self.data.write().unwrap();
 
-        for record in records {
-            match record.command() {
-                Command::Set => {
-                    if let Some(value) = record.value() {
-                        data.insert(record.key().to_owned(), Entry::Set(value.to_owned()));
-                    }
-                }
-                Command::Delete => {
-                    data.insert(record.key().to_owned(), Entry::Delete);
-                }
+    for record in records {
+        match record.command() {
+            Command::Set { key, value } => {
+                data.insert(key.clone(), Entry::Set(value.clone()));
+            }
+
+            Command::Delete { key } => {
+                data.insert(key.clone(), Entry::Delete);
             }
         }
-
-        Ok(())
     }
+
+    Ok(())
+}
 }

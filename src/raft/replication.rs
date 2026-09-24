@@ -50,6 +50,7 @@ impl RaftNode {
         }
 
         self.role = Role::Follower;
+        self.leader_id = Some(entries.leader_id);
 
         self.reset_election_timeout();
 
@@ -120,7 +121,6 @@ impl RaftNode {
         }
 
         let peer = response.follower_id;
-
 
         if response.success {
             self.match_index.insert(peer, response.match_index);
@@ -201,14 +201,18 @@ impl RaftNode {
 
             let command = self.log[self.last_applied].record.command.clone();
 
-            if super::is_log_enabled() {
-                match command {
-                    Command::Set { key, value, .. } => {
-                        println!("Node {} applied SET {} = {:?}", self.id.id, key, value);
+            match command {
+                Command::Set { ref key, ref value } => {
+                    let _ = self.db.insert(key.clone(), value.clone());
+                    if super::is_log_enabled() {
+                        println!("[NODE {}] Applied SET {} = {:?}", self.id.id, key, value);
                     }
+                }
 
-                    Command::Delete { key, .. } => {
-                        println!("Node {} applied DELETE {}", self.id.id, key);
+                Command::Delete { ref key } => {
+                    let _ = self.db.delete(key.clone());
+                    if super::is_log_enabled() {
+                        println!("[NODE {}] Applied DELETE {}", self.id.id, key);
                     }
                 }
             }

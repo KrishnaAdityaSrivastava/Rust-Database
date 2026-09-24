@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use kv_store::Config;
 use kv_store::raft::{LogEntry, Message, NodeId, RaftNode, Role};
 use kv_store::wal::log_record::{Command, LogRecord, Value};
 
@@ -31,7 +32,7 @@ impl Cluster {
                 .filter(|node| node.id != id)
                 .collect();
 
-            nodes.insert(id, RaftNode::new(NodeId { id }, peers));
+            nodes.insert(id, RaftNode::new(NodeId { id }, peers, Config::default()));
         }
 
         Self {
@@ -713,5 +714,44 @@ fn test_typed_value_replication() {
             key: "integer".into(),
             value: Value::Int(42),
         }
+    );
+}
+
+// -----------------------------------------------------------------------------
+// 15. Direct Request to Follower Node (Auto Forwarding to Leader)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_command_sent_directly_to_follower_is_forwarded() {
+    let mut cluster = Cluster::new(vec![1, 2, 3]);
+
+    // Node 1 becomes leader
+    cluster.nodes.get_mut(&1).unwrap().start_election();
+    cluster.route_messages();
+
+    assert_eq!(cluster.nodes[&1].role, Role::Leader);
+    assert_eq!(cluster.nodes[&2].role, Role::Follower);
+
+    // Send client command directly to Node 2 (a follower)
+    cluster.nodes.get_mut(&2).unwrap().submit_command(Command::Set {
+        key: "follower_key".into(),
+        value: string("follower_val"),
+    });
+
+    // Route messages so Node 2 forwards to Leader (Node 1) and Leader replicates to followers
+    cluster.route_messages();
+
+    // Leader sends heartbeat to communicate updated commit_index (1) to followers
+    cluster.nodes.get_mut(&1).unwrap().send_heartbeats();
+    cluster.route_messages();
+
+    // Verify command was successfully committed and applied on all nodes
+    assert_eq!(cluster.nodes[&1].commit_index, 1);
+    assert_eq!(cluster.nodes[&2].commit_index, 1);
+    assert_eq!(cluster.nodes[&3].commit_index, 1);
+
+    assert_eq!(
+        cluster.nodes[&2].get("follower_key").unwrap(),
+        Some(string("follower_val"))
     );
 }

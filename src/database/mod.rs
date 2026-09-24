@@ -39,21 +39,55 @@ pub struct Database {
     pub(crate) compaction_duration_micros: std::sync::atomic::AtomicU64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Config {
+    pub sstable_level: usize,
+    pub data_threshold: usize,
+    pub sstable_threshold: usize,
+}
+
+impl Config {
+    pub fn new(sstable_level: usize, data_threshold: usize, sstable_threshold: usize) -> Self {
+        Self {
+            sstable_level,
+            data_threshold,
+            sstable_threshold,
+        }
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            sstable_level: 2,
+            data_threshold: 2,
+            sstable_threshold: 3,
+        }
+    }
+}
+
+impl From<(usize, usize, usize)> for Config {
+    fn from((sstable_level, data_threshold, sstable_threshold): (usize, usize, usize)) -> Self {
+        Self {
+            sstable_level,
+            data_threshold,
+            sstable_threshold,
+        }
+    }
+}
+
 impl Database {
-    pub fn new(
-        sstable_level: usize,
-        data_threshold: usize,
-        sstable_threshold: usize,
-    ) -> io::Result<Self> {
-        Self::open_in_dir(".", sstable_level, data_threshold, sstable_threshold)
+    pub fn new(config: impl Into<Config>) -> io::Result<Self> {
+        #[allow(deprecated)]
+        let dir = tempfile::tempdir()?.into_path();
+        Self::open_in_dir(dir, config)
     }
 
     pub fn open_in_dir(
         dir: impl AsRef<Path>,
-        sstable_level: usize,
-        data_threshold: usize,
-        sstable_threshold: usize,
+        config: impl Into<Config>,
     ) -> io::Result<Self> {
+        let config = config.into();
         let dir = dir.as_ref().to_path_buf();
         std::fs::create_dir_all(&dir)?;
 
@@ -63,9 +97,9 @@ impl Database {
             data: RwLock::new(HashMap::new()),
             flush_lock: Mutex::new(()),
             compaction_lock: Mutex::new(()),
-            leveled_sstable: RwLock::new((0..sstable_level).map(|_| Vec::new()).collect()),
-            data_threshold,
-            sstable_threshold,
+            leveled_sstable: RwLock::new((0..config.sstable_level).map(|_| Vec::new()).collect()),
+            data_threshold: config.data_threshold,
+            sstable_threshold: config.sstable_threshold,
             next_sstable_id: AtomicU32::new(0),
             total_compactions: std::sync::atomic::AtomicU64::new(0),
             compaction_duration_micros: std::sync::atomic::AtomicU64::new(0),
@@ -113,15 +147,15 @@ impl Database {
         Ok(())
     }
 
-    pub fn delete(&self, key: &str) -> io::Result<()> {
+    pub fn delete(&self, key: String) -> io::Result<()> {
         {
             let mut log = self.log.lock().unwrap();
-            log.log(Command::Delete { key:key.to_string() })?;
+            log.log(Command::Delete { key:key.clone() })?;
         }
 
         {
             let mut data = self.data.write().unwrap();
-            data.insert(key.to_owned(), Entry::Delete);
+            data.insert(key, Entry::Delete);
         }
 
         self.maybe_flush()?;

@@ -10,6 +10,7 @@ use super::{
 impl RaftNode {
     pub fn become_leader(&mut self) {
         self.role = Role::Leader;
+        self.leader_id = Some(self.id);
 
         for &peer in &self.peers {
             self.next_index.insert(peer, self.log.len());
@@ -30,6 +31,7 @@ impl RaftNode {
 
     pub fn start_election(&mut self) {
         self.role = Role::Candidate;
+        self.leader_id = None;
 
         self.current_term += 1;
 
@@ -114,6 +116,7 @@ impl RaftNode {
             self.current_term = request.term;
             self.role = Role::Follower;
             self.voted_for = None;
+            self.leader_id = None;
         }
 
         let can_vote = match self.voted_for {

@@ -1,13 +1,13 @@
 use std::io;
 use std::sync::Arc;
 
-use kv_store::database::Database;
+use kv_store::{Config, Database};
 use kv_store::wal::log_record::Value;
 
 fn main() -> io::Result<()> {
     // Flush memtable after 2 entries.
     // Compact when 2 SSTables exist.
-    let db = Arc::new(Database::new(2, 2, 3)?);
+    let db = Arc::new(Database::new(Config::default())?);
 
     let db2 = Arc::clone(&db);
 
@@ -54,7 +54,7 @@ fn main() -> io::Result<()> {
 
     println!("\n--- DELETE TEST ---");
 
-    db.delete("cat")?;
+    db.delete("cat".to_string())?;
 
     print_value(&db, "cat")?;
 

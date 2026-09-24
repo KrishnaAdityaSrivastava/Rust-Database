@@ -3,7 +3,7 @@ use std::fs;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
-use kv_store::{Command, Database, NodeId, RaftNode, Role, wal::log_record::Value};
+use kv_store::{Command, Config, Database, NodeId, RaftNode, Role, wal::log_record::Value};
 
 /// Process Resident Set Size (RSS) in bytes from /proc/self/statm
 fn get_memory_rss_bytes() -> usize {
@@ -78,10 +78,10 @@ impl TestCluster {
 
         for &id in &node_ids {
             let peers = node_ids.iter().filter(|n| n.id != id.id).cloned().collect();
-            nodes.insert(id.id, RaftNode::new(id, peers));
+            nodes.insert(id.id, RaftNode::new(id, peers, Config::default()));
 
             let dir = tempdir().unwrap();
-            let db = Database::open_in_dir(dir.path(), 3, 200, 4).expect("Failed DB open");
+            let db = Database::open_in_dir(dir.path(), Config::new(3, 200, 4)).expect("Failed DB open");
             databases.insert(id.id, db);
             db_applied.insert(id.id, 0);
             temp_dirs.push(dir);
@@ -212,7 +212,7 @@ fn run_unified_stress_correctness_and_benchmarks() {
     // 1. STANDALONE DATABASE ENGINE STRESS & BENCHMARK (CRUD Operations)
     // -------------------------------------------------------------------------
     let standalone_dir = tempdir().unwrap();
-    let standalone_db = Database::open_in_dir(standalone_dir.path(), 3, 200, 4).unwrap();
+    let standalone_db = Database::open_in_dir(standalone_dir.path(), Config::new(3, 200, 4)).unwrap();
     let num_ops = 10_000;
 
     // 1a. Sequential Insert
@@ -264,7 +264,7 @@ fn run_unified_stress_correctness_and_benchmarks() {
     let start_delete = Instant::now();
     for i in 0..(num_ops / 2) {
         let op_start = Instant::now();
-        standalone_db.delete(&format!("key_{:06}", i)).unwrap();
+        standalone_db.delete(format!("key_{:06}", i)).unwrap();
         delete_lats.push(op_start.elapsed());
     }
     let delete_stats = calculate_latency_stats(delete_lats, start_delete.elapsed());

@@ -49,7 +49,7 @@ impl Network {
                                     let guard = senders_ref.read().unwrap();
                                     for (to, out_msg) in node.outbox.drain(..) {
                                         match out_msg {
-                                            Message::ClientCommand(_) | Message::Timeout => continue,
+                                            Message::Timeout => continue,
                                             _ => {}
                                         }
                                         if let Some(sender) = guard.get(&to) {
@@ -70,7 +70,7 @@ impl Network {
                             let guard = senders_ref.read().unwrap();
                             for (to, out_msg) in node.outbox.drain(..) {
                                 match out_msg {
-                                    Message::ClientCommand(_) | Message::Timeout => continue,
+                                    Message::Timeout => continue,
                                     _ => {}
                                 }
                                 if let Some(sender) = guard.get(&to) {
@@ -185,18 +185,9 @@ impl Network {
             id: u64::from_be_bytes(id_buf),
         };
 
-        if peer_id.id <= local_id.id {
-            eprintln!(
-                "Node {} rejected unexpected connection from Node {}",
-                local_id.id, peer_id.id
-            );
-
-            return;
-        }
-
         if super::is_log_enabled() {
             println!(
-                "Node {} accepted connection from Node {}",
+                "Node {} accepted connection from Node/Client {}",
                 local_id.id, peer_id.id
             );
         }

@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::wal::log_record::{Command, LogRecord, Value};
+use crate::{database::Config, Database, wal::log_record::{Command, LogRecord, Value}};
 
 use super::message::Message;
 
@@ -33,6 +33,7 @@ pub struct LogEntry {
 // }
 
 pub struct RaftNode {
+    pub db: Database,
     pub id: NodeId,
     pub peers: Vec<NodeId>,
 
@@ -52,6 +53,7 @@ pub struct RaftNode {
     // Election state
     pub role: Role,
     pub votes_received: HashSet<NodeId>,
+    pub leader_id: Option<NodeId>,
 
     // Networking
     pub outbox: Vec<(NodeId, Message)>,
@@ -62,7 +64,19 @@ pub struct RaftNode {
 }
 
 impl RaftNode {
-    pub fn new(id: NodeId, peers: Vec<NodeId>) -> Self {
+    pub fn new(id: NodeId, peers: Vec<NodeId>, config: impl Into<Config>) -> Self {
+        #[allow(deprecated)]
+        let dir = tempfile::tempdir().unwrap().into_path();
+        Self::new_in_dir(dir, id, peers, config)
+    }
+
+    pub fn new_in_dir(
+        dir: impl AsRef<std::path::Path>,
+        id: NodeId,
+        peers: Vec<NodeId>,
+        config: impl Into<Config>,
+    ) -> Self {
+        let config = config.into();
         let mut node = Self {
             id,
             peers,
@@ -89,17 +103,29 @@ impl RaftNode {
 
             role: Role::Follower,
             votes_received: HashSet::new(),
+            leader_id: None,
 
             outbox: Vec::new(),
 
             election_deadline: Instant::now(),
             heartbeat_deadline: Instant::now(),
+
+            db: Database::open_in_dir(dir, config).unwrap(),
         };
 
         node.reset_election_timeout();
 
         node
     }
+
+    pub fn submit_command(&mut self, cmd: Command) {
+        self.handle_message(Message::ClientCommand(cmd));
+    }
+
+    pub fn get(&self, key: &str) -> std::io::Result<Option<Value>> {
+        self.db.get(key)
+    }
+
     pub fn tick(&mut self) {
         let now = Instant::now();
 
@@ -134,6 +160,7 @@ impl RaftNode {
         self.current_term = new_term;
         self.role = Role::Follower;
         self.voted_for = None;
+        self.leader_id = None;
         self.reset_election_timeout();
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use kv_store::raft::{Message, Network, NodeId, RaftNode};
-use kv_store::{Command, wal::log_record::Value};
+use kv_store::{Command, Config, wal::log_record::Value};
 
 #[tokio::main]
 async fn main() {
@@ -46,7 +46,7 @@ async fn main() {
         peer_ids.push(pid);
     }
 
-    let node = RaftNode::new(local_id, peer_ids);
+    let node = RaftNode::new(local_id, peer_ids, Config::default());
     let network = Network::new(local_id, local_addr, peers_map);
 
     let tx = network.start(node).await;

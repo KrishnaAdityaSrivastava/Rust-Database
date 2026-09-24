@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::thread;
 
 use kv_store::wal::log_record::Value;
-use kv_store::Database;
+use kv_store::{Config, Database};
 use tempfile::tempdir;
 
 fn string(value: &str) -> Value {
@@ -10,7 +10,7 @@ fn string(value: &str) -> Value {
 }
 
 fn create_test_db(dir: &std::path::Path) -> Database {
-    Database::open_in_dir(dir, 2, 2, 2)
+    Database::open_in_dir(dir, Config::default())
         .expect("Failed to create database")
 }
 
@@ -48,7 +48,7 @@ fn test_basic_crud() {
     );
 
     // Delete
-    db.delete("key2").unwrap();
+    db.delete("key2".to_string()).unwrap();
 
     assert_eq!(
         db.get("key2").unwrap(),

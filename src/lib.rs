@@ -3,7 +3,7 @@ pub mod lsm;
 pub mod raft;
 pub mod wal;
 
-pub use database::Database;
+pub use database::{Config, Config as DbConfig, Config as DatabaseConfig, Database};
 pub use lsm::sstable::SSTable;
 pub use raft::{ Message, Network, NodeId, RaftNode, Role};
 

@@ -1,3 +1,4 @@
+use kv_store::Config;
 use kv_store::raft::{Message, Network, NodeId, RaftNode};
 use kv_store::wal::log_record::{Command, LogRecord, Value};
 use std::collections::HashMap;
@@ -20,9 +21,9 @@ async fn test_tcp_cluster_startup_and_election() {
     peers3.insert(id1, "127.0.0.1:6001".to_string());
     peers3.insert(id2, "127.0.0.1:6002".to_string());
 
-    let node1 = RaftNode::new(id1, vec![id2, id3]);
-    let node2 = RaftNode::new(id2, vec![id1, id3]);
-    let node3 = RaftNode::new(id3, vec![id1, id2]);
+    let node1 = RaftNode::new(id1, vec![id2, id3], Config::default());
+    let node2 = RaftNode::new(id2, vec![id1, id3], Config::default());
+    let node3 = RaftNode::new(id3, vec![id1, id2], Config::default());
 
     let net1 = Network::new(id1, "127.0.0.1:6001".to_string(), peers1);
     let net2 = Network::new(id2, "127.0.0.1:6002".to_string(), peers2);
@@ -130,9 +131,9 @@ async fn test_tcp_network_cluster_throughput() {
     peers3.insert(id1, "127.0.0.1:7001".to_string());
     peers3.insert(id2, "127.0.0.1:7002".to_string());
 
-    let node1 = RaftNode::new(id1, vec![id2, id3]);
-    let node2 = RaftNode::new(id2, vec![id1, id3]);
-    let node3 = RaftNode::new(id3, vec![id1, id2]);
+    let node1 = RaftNode::new(id1, vec![id2, id3], Config::default());
+    let node2 = RaftNode::new(id2, vec![id1, id3], Config::default());
+    let node3 = RaftNode::new(id3, vec![id1, id2], Config::default());
 
     let net1 = Network::new(id1, "127.0.0.1:7001".to_string(), peers1);
     let net2 = Network::new(id2, "127.0.0.1:7002".to_string(), peers2);
@@ -166,5 +167,53 @@ async fn test_tcp_network_cluster_throughput() {
         "Tokio TCP 3-Node Network throughput benchmark: sent {} ops in {:?}",
         num_ops, elapsed
     );
+}
+
+#[tokio::test]
+async fn test_tcp_direct_request_to_follower_forwarding() {
+    let id1 = NodeId { id: 301 };
+    let id2 = NodeId { id: 302 };
+    let id3 = NodeId { id: 303 };
+
+    let mut peers1 = HashMap::new();
+    peers1.insert(id2, "127.0.0.1:8002".to_string());
+    peers1.insert(id3, "127.0.0.1:8003".to_string());
+
+    let mut peers2 = HashMap::new();
+    peers2.insert(id1, "127.0.0.1:8001".to_string());
+    peers2.insert(id3, "127.0.0.1:8003".to_string());
+
+    let mut peers3 = HashMap::new();
+    peers3.insert(id1, "127.0.0.1:8001".to_string());
+    peers3.insert(id2, "127.0.0.1:8002".to_string());
+
+    let node1 = RaftNode::new(id1, vec![id2, id3], Config::default());
+    let node2 = RaftNode::new(id2, vec![id1, id3], Config::default());
+    let node3 = RaftNode::new(id3, vec![id1, id2], Config::default());
+
+    let net1 = Network::new(id1, "127.0.0.1:8001".to_string(), peers1);
+    let net2 = Network::new(id2, "127.0.0.1:8002".to_string(), peers2);
+    let net3 = Network::new(id3, "127.0.0.1:8003".to_string(), peers3);
+
+    let tx1 = net1.start(node1).await;
+    let tx2 = net2.start(node2).await;
+    let _tx3 = net3.start(node3).await;
+
+    // Allow time for TCP connections to establish
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Trigger election on Node 1 (who becomes Leader)
+    tx1.send(Message::Timeout).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Send a client command directly to Node 2 (a follower)
+    tx2.send(Message::ClientCommand(Command::Set {
+        key: "direct_tcp_key".to_string(),
+        value: Value::String("direct_tcp_val".to_string()),
+    }))
+    .unwrap();
+
+    // Allow time for Node 2 to forward to Node 1 and Node 1 to replicate back to Node 2 & 3
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 

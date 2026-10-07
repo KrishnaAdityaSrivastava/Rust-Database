@@ -8,6 +8,26 @@ use tokio::time::Duration;
 
 use super::message::Message;
 use super::node::{NodeId, RaftNode};
+use super::execution::runtime::{Runtime, Transport};
+
+// struct OutgoingMessage {
+//     pub to: NodeId,
+//     pub message: Message,
+// }
+
+struct NetworkTransport {
+    active_senders: Arc<RwLock<HashMap<NodeId, UnboundedSender<Message>>>>,
+}
+
+impl Transport for NetworkTransport {
+    fn send(&self, _from: NodeId, to: NodeId, message: Message) {
+        let senders = self.active_senders.read().unwrap();
+
+        if let Some(sender) = senders.get(&to) {
+            let _ = sender.send(message);
+        }
+    }
+}
 
 pub struct Network {
     local_id: NodeId,
@@ -28,60 +48,16 @@ impl Network {
         }
     }
 
-    pub async fn start(self, mut node: RaftNode) -> UnboundedSender<Message> {
-        let (node_tx, mut node_rx) = mpsc::unbounded_channel::<Message>();
-
+    pub async fn start(self, node: RaftNode) -> UnboundedSender<Message> {
         let local_id = self.local_id;
-        let senders_ref = self.active_senders.clone();
 
-        tokio::spawn(async move {
-            let mut tick_interval = tokio::time::interval(Duration::from_millis(50));
+        let (node_tx, node_rx) = mpsc::unbounded_channel::<Message>();
 
-            loop {
-                tokio::select! {
-                    msg = node_rx.recv() => {
-                        match msg {
-                            Some(msg) => {
-                                node.handle_message(msg);
+        let transport = NetworkTransport {
+            active_senders: self.active_senders.clone(),
+        };
 
-                                // Send everything produced by Raft directly to peer channels.
-                                if !node.outbox.is_empty() {
-                                    let guard = senders_ref.read().unwrap();
-                                    for (to, out_msg) in node.outbox.drain(..) {
-                                        match out_msg {
-                                            Message::Timeout => continue,
-                                            _ => {}
-                                        }
-                                        if let Some(sender) = guard.get(&to) {
-                                            let _ = sender.send(out_msg);
-                                        }
-                                    }
-                                }
-                            }
-                            None => return,
-                        }
-                    }
-
-                    _ = tick_interval.tick() => {
-                        node.tick();
-
-                        // Send everything produced by tick directly to peer channels.
-                        if !node.outbox.is_empty() {
-                            let guard = senders_ref.read().unwrap();
-                            for (to, out_msg) in node.outbox.drain(..) {
-                                match out_msg {
-                                    Message::Timeout => continue,
-                                    _ => {}
-                                }
-                                if let Some(sender) = guard.get(&to) {
-                                    let _ = sender.send(out_msg);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        Runtime::new(node, transport).start(node_rx);
 
         let acceptor_addr = self.local_addr.clone();
         let acceptor_senders = self.active_senders.clone();
@@ -155,7 +131,6 @@ impl Network {
 
                         Err(_) => {
                             // Peer may simply be offline.
-                            // Retry later.
                         }
                     }
                 }
@@ -240,26 +215,12 @@ impl Network {
         {
             let mut senders = active_senders.write().unwrap();
 
-            /*
-             * If another connection already exists, replace it.
-             *
-             * Dropping the old Sender causes its writer task
-             * to eventually terminate.
-             */
+            //If another connection already exists, replace it. Dropping the old Sender causes its writer task to eventually terminate.
+
             senders.insert(peer_id, writer_tx);
         }
 
-        /*
-         * Split the TCP stream into owned read and write halves.
-         *
-         * One half is used for reading.
-         * One is used for writing.
-         */
         let (mut reader, mut writer) = stream.into_split();
-
-        // ------------------------------------------------------------
-        // WRITER TASK
-        // ------------------------------------------------------------
 
         tokio::spawn(async move {
             let mut buf = Vec::with_capacity(1024);
@@ -343,6 +304,7 @@ impl Network {
             }
 
             // Clean up the sender for this peer on disconnect.
+            //fix: race cond
             reader_senders.write().unwrap().remove(&peer_id);
 
             if super::is_log_enabled() {

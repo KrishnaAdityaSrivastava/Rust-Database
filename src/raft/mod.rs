@@ -3,6 +3,7 @@ pub mod message;
 pub mod network;
 pub mod node;
 pub mod replication;
+pub mod execution;
 
 pub use node::{LogEntry, NodeId, RaftNode, Role};
 
@@ -12,6 +13,8 @@ pub use message::{
 };
 
 pub use network::Network;
+pub use execution::simulator::{Event, Simulation};
+pub use execution::runtime::{Clock, Runtime, Transport};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

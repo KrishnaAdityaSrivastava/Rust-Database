@@ -1,4 +1,5 @@
 use crate::{raft::RaftNode};
+use std::time::Instant;
 use crate::wal::log_record::Command;
 use super::node::{LogEntry, NodeId};
 use serde::{Serialize, Deserialize};
@@ -86,30 +87,42 @@ pub enum Message {
     StatusQuery(StatusQuery),
     ClientResponse(ClientResponse),
 
+    //remove this branch later
     Timeout,
 }
 
+
 impl RaftNode {
-    pub fn handle_message(&mut self, message: Message) {
+    pub fn handle_message(&mut self, message: Message, now: Instant) {
         match message {
             Message::RequestVote(request) => {
                 let candidate_id = request.candidate_id;
-                let response = self.handle_request_vote(request);
-                self.outbox.push((candidate_id, Message::RequestVoteResponse(response)));
+
+                let response = self.handle_request_vote(request, now);
+
+                self.outbox.push((
+                    candidate_id,
+                    Message::RequestVoteResponse(response),
+                ));
             }
 
             Message::RequestVoteResponse(response) => {
-                self.handle_vote_response(response);
+                self.handle_vote_response(response, now);
             }
 
             Message::AppendEntries(entries) => {
                 let leader_id = entries.leader_id;
-                let response = self.handle_append_entries(entries);
-                self.outbox.push((leader_id, Message::AppendEntriesResponse(response)));
+
+                let response = self.handle_append_entries(entries, now);
+
+                self.outbox.push((
+                    leader_id,
+                    Message::AppendEntriesResponse(response),
+                ));
             }
 
             Message::AppendEntriesResponse(response) => {
-                self.handle_append_entries_response(response);
+                self.handle_append_entries_response(response, now);
             }
 
             Message::ClientCommand(cmd) => {
@@ -122,7 +135,11 @@ impl RaftNode {
                             self.id.id, leader_id.id
                         );
                     }
-                    self.outbox.push((leader_id, Message::ClientCommand(cmd)));
+
+                    self.outbox.push((
+                        leader_id,
+                        Message::ClientCommand(cmd),
+                    ));
                 } else if super::is_log_enabled() {
                     println!(
                         "Node {} is not leader and no leader is known yet, dropping command",
@@ -134,21 +151,29 @@ impl RaftNode {
             Message::ClientRequest(req) => {
                 let client_id = req.client_id;
                 let req_id = req.request_id;
+
                 if super::is_log_enabled() {
                     println!(
                         "[NODE {}] Received ClientRequest ({:?}) from Client {}",
-                        self.id.id, req.command, client_id.id
+                        self.id.id,
+                        req.command,
+                        client_id.id
                     );
                 }
+
                 if self.role == crate::raft::Role::Leader {
                     self.append_command(req.command.clone());
+
                     self.outbox.push((
                         client_id,
                         Message::ClientResponse(ClientResponse {
                             request_id: req_id,
                             success: true,
                             value: None,
-                            message: format!("Command processed on Leader Node {}", self.id.id),
+                            message: format!(
+                                "Command processed on Leader Node {}",
+                                self.id.id
+                            ),
                             leader_id: Some(self.id),
                             node_id: self.id,
                             role: format!("{:?}", self.role),
@@ -159,10 +184,11 @@ impl RaftNode {
                     if super::is_log_enabled() {
                         println!(
                             "[NODE {}] Forwarding client request to Leader Node {}",
-                            self.id.id, leader_id.id
+                            self.id.id,
+                            leader_id.id
                         );
                     }
-                    // Inform client that request was forwarded to leader
+
                     self.outbox.push((
                         client_id,
                         Message::ClientResponse(ClientResponse {
@@ -171,7 +197,8 @@ impl RaftNode {
                             value: None,
                             message: format!(
                                 "Node {} (Follower) forwarded request to Leader Node {}",
-                                self.id.id, leader_id.id
+                                self.id.id,
+                                leader_id.id
                             ),
                             leader_id: Some(leader_id),
                             node_id: self.id,
@@ -179,8 +206,11 @@ impl RaftNode {
                             term: self.current_term,
                         }),
                     ));
-                    // Forward actual request to Leader
-                    self.outbox.push((leader_id, Message::ClientRequest(req)));
+
+                    self.outbox.push((
+                        leader_id,
+                        Message::ClientRequest(req),
+                    ));
                 } else {
                     if super::is_log_enabled() {
                         println!(
@@ -188,6 +218,7 @@ impl RaftNode {
                             self.id.id
                         );
                     }
+
                     self.outbox.push((
                         client_id,
                         Message::ClientResponse(ClientResponse {
@@ -208,13 +239,8 @@ impl RaftNode {
             }
 
             Message::ClientQuery(query) => {
-                if super::is_log_enabled() {
-                    println!(
-                        "[NODE {}] Received ClientQuery for key '{}' from Client {}",
-                        self.id.id, query.key, query.client_id.id
-                    );
-                }
                 let val = self.db.get(&query.key).unwrap_or(None);
+
                 self.outbox.push((
                     query.client_id,
                     Message::ClientResponse(ClientResponse {
@@ -231,19 +257,13 @@ impl RaftNode {
             }
 
             Message::StatusQuery(query) => {
-                if super::is_log_enabled() {
-                    println!(
-                        "[NODE {}] Received StatusQuery from Client {}",
-                        self.id.id, query.client_id.id
-                    );
-                }
                 self.outbox.push((
                     query.client_id,
                     Message::ClientResponse(ClientResponse {
                         request_id: query.request_id,
                         success: true,
                         value: None,
-                        message: format!("Node status OK"),
+                        message: "Node status OK".to_string(),
                         leader_id: self.leader_id,
                         node_id: self.id,
                         role: format!("{:?}", self.role),
@@ -255,7 +275,7 @@ impl RaftNode {
             Message::ClientResponse(_) => {}
 
             Message::Timeout => {
-                self.start_election();
+                self.start_election(now);
             }
         }
     }

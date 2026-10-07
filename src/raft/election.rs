@@ -8,7 +8,7 @@ use super::{
 };
 
 impl RaftNode {
-    pub fn become_leader(&mut self) {
+    pub fn become_leader(&mut self,now: Instant) {
         self.role = Role::Leader;
         self.leader_id = Some(self.id);
 
@@ -22,14 +22,14 @@ impl RaftNode {
         }
 
         // Leader should send heartbeats periodically.
-        self.heartbeat_deadline = Instant::now() + Duration::from_millis(100);
+        self.heartbeat_deadline = now + Duration::from_millis(100);
 
         if super::is_log_enabled() {
             println!("Node {} became LEADER", self.id.id);
         }
     }
 
-    pub fn start_election(&mut self) {
+    pub fn start_election(&mut self,now: Instant) {
         self.role = Role::Candidate;
         self.leader_id = None;
 
@@ -44,12 +44,12 @@ impl RaftNode {
         let majority = cluster_size / 2 + 1;
 
         if self.votes_received.len() >= majority {
-            self.become_leader();
+            self.become_leader(now);
             return;
         }
 
         // Start a fresh election timeout.
-        self.reset_election_timeout();
+        self.reset_election_timeout(now);
 
         let last_log_index = self.log.len() - 1;
         let last_log_term = self.log[last_log_index].term;
@@ -74,10 +74,10 @@ impl RaftNode {
         }
     }
 
-    pub fn handle_vote_response(&mut self, response: RequestVoteResponse) {
+    pub fn handle_vote_response(&mut self, response: RequestVoteResponse,now: Instant) {
         // A newer term always wins.
         if response.term > self.current_term {
-            self.step_down(response.term);
+            self.step_down(response.term, now);
             return;
         }
 
@@ -99,11 +99,11 @@ impl RaftNode {
         let majority = cluster_size / 2 + 1;
 
         if self.votes_received.len() >= majority {
-            self.become_leader();
+            self.become_leader(now);
         }
     }
 
-    pub fn handle_request_vote(&mut self, request: RequestVote) -> RequestVoteResponse {
+    pub fn handle_request_vote(&mut self, request: RequestVote, now: Instant) -> RequestVoteResponse {
         if request.term < self.current_term {
             return RequestVoteResponse {
                 term: self.current_term,
@@ -149,7 +149,7 @@ impl RaftNode {
         self.voted_for = Some(request.candidate_id);
 
         // Only reset because we actually granted the vote.
-        self.reset_election_timeout();
+        self.reset_election_timeout(now);
 
         if super::is_log_enabled() {
             println!(
@@ -165,9 +165,9 @@ impl RaftNode {
         }
     }
 
-    pub fn reset_election_timeout(&mut self) {
+    pub fn reset_election_timeout(&mut self,now: Instant) {
         let millis = rand::rng().random_range(150..=300);
 
-        self.election_deadline = Instant::now() + Duration::from_millis(millis);
+        self.election_deadline = now + Duration::from_millis(millis);
     }
 }

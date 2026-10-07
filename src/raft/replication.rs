@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use crate::wal::log_record::{Command, LogRecord};
 
 use super::{
@@ -35,7 +37,7 @@ impl RaftNode {
         }
     }
 
-    pub fn handle_append_entries(&mut self, entries: AppendEntries) -> AppendEntriesResponse {
+    pub fn handle_append_entries(&mut self, entries: AppendEntries, now: Instant) -> AppendEntriesResponse {
         if entries.term < self.current_term {
             return AppendEntriesResponse {
                 term: self.current_term,
@@ -46,13 +48,13 @@ impl RaftNode {
         }
 
         if entries.term > self.current_term {
-            self.step_down(entries.term);
+            self.step_down(entries.term, now);
         }
 
         self.role = Role::Follower;
         self.leader_id = Some(entries.leader_id);
 
-        self.reset_election_timeout();
+        self.reset_election_timeout(now);
 
         let prev_log_index = entries.prev_log_index;
 
@@ -106,9 +108,9 @@ impl RaftNode {
         }
     }
 
-    pub fn handle_append_entries_response(&mut self, response: AppendEntriesResponse) {
+    pub fn handle_append_entries_response(&mut self, response: AppendEntriesResponse,now: Instant) {
         if response.term > self.current_term {
-            self.step_down(response.term);
+            self.step_down(response.term, now);
             return;
         }
 

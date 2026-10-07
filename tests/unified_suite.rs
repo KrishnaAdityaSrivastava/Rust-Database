@@ -3,7 +3,7 @@ use std::fs;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
-use kv_store::{Command, Config, Database, NodeId, RaftNode, Role, wal::log_record::Value};
+use kv_store::{Command, Config, Database, Role, Simulation, wal::log_record::Value};
 
 /// Process Resident Set Size (RSS) in bytes from /proc/self/statm
 fn get_memory_rss_bytes() -> usize {
@@ -62,7 +62,7 @@ fn format_bytes(bytes: u64) -> String {
 
 /// Simulated Cluster Harness for deterministic high-volume stress testing and consensus metrics
 struct TestCluster {
-    nodes: HashMap<u64, RaftNode>,
+    sim: Simulation,
     databases: HashMap<u64, Database>,
     db_applied: HashMap<u64, usize>,
     _temp_dirs: Vec<tempfile::TempDir>,
@@ -70,56 +70,30 @@ struct TestCluster {
 
 impl TestCluster {
     fn new(size: usize) -> Self {
-        let node_ids: Vec<NodeId> = (1..=(size as u64)).map(|id| NodeId { id }).collect();
-        let mut nodes = HashMap::new();
+        let node_ids: Vec<u64> = (1..=(size as u64)).collect();
+        let mut sim = Simulation::new_cluster(&node_ids);
         let mut databases = HashMap::new();
         let mut db_applied = HashMap::new();
         let mut temp_dirs = Vec::new();
 
         for &id in &node_ids {
-            let peers = node_ids.iter().filter(|n| n.id != id.id).cloned().collect();
-            nodes.insert(id.id, RaftNode::new(id, peers, Config::default()));
-
             let dir = tempdir().unwrap();
             let db = Database::open_in_dir(dir.path(), Config::new(3, 200, 4)).expect("Failed DB open");
-            databases.insert(id.id, db);
-            db_applied.insert(id.id, 0);
+            databases.insert(id, db);
+            db_applied.insert(id, 0);
             temp_dirs.push(dir);
         }
 
-        let mut cluster = Self {
-            nodes,
+        // Elect Node 1 as leader
+        sim.start_election(1);
+        sim.route_messages();
+        assert_eq!(sim[1].role, Role::Leader);
+
+        Self {
+            sim,
             databases,
             db_applied,
             _temp_dirs: temp_dirs,
-        };
-
-        // Elect Node 1 as leader
-        cluster.nodes.get_mut(&1).unwrap().start_election();
-        cluster.route_messages();
-        assert_eq!(cluster.nodes[&1].role, Role::Leader);
-
-        cluster
-    }
-
-    fn route_messages(&mut self) {
-        loop {
-            let mut pending = Vec::new();
-            for (&from_id, node) in self.nodes.iter_mut() {
-                for (to_node, msg) in node.outbox.drain(..) {
-                    pending.push((from_id, to_node.id, msg));
-                }
-            }
-
-            if pending.is_empty() {
-                break;
-            }
-
-            for (_from_id, to_id, msg) in pending {
-                if let Some(target) = self.nodes.get_mut(&to_id) {
-                    target.handle_message(msg);
-                }
-            }
         }
     }
 
@@ -134,14 +108,13 @@ impl TestCluster {
             let val = format!("v_{}", i);
 
             // Send command to Leader (Node 1)
-            let leader = self.nodes.get_mut(&1).unwrap();
-            leader.append_command(Command::Set { key, value: Value::String(val) });
-            self.route_messages();
+            self.sim[1].append_command(Command::Set { key, value: Value::String(val) });
+            self.sim.route_messages();
 
             // Apply committed entries to local database on all nodes
-            for (&node_id, node) in self.nodes.iter() {
-                let db = self.databases.get(&node_id).unwrap();
-                let applied = self.db_applied.get_mut(&node_id).unwrap();
+            for (&node_id, node) in self.sim.nodes.iter() {
+                let db = self.databases.get(&node_id.id).unwrap();
+                let applied = self.db_applied.get_mut(&node_id.id).unwrap();
                 while *applied < node.commit_index {
                     *applied += 1;
                     if *applied < node.log.len() {
@@ -160,15 +133,14 @@ impl TestCluster {
 
         // 2 rounds of heartbeats so all followers advance commit_index to final leader commit
         for _ in 0..2 {
-            let leader = self.nodes.get_mut(&1).unwrap();
-            leader.send_heartbeats();
-            self.route_messages();
+            self.sim[1].send_heartbeats();
+            self.sim.route_messages();
         }
 
         // Apply any remaining committed entries to DBs
-        for (&node_id, node) in self.nodes.iter() {
-            let db = self.databases.get(&node_id).unwrap();
-            let applied = self.db_applied.get_mut(&node_id).unwrap();
+        for (&node_id, node) in self.sim.nodes.iter() {
+            let db = self.databases.get(&node_id.id).unwrap();
+            let applied = self.db_applied.get_mut(&node_id.id).unwrap();
             while *applied < node.commit_index {
                 *applied += 1;
                 if *applied < node.log.len() {
@@ -181,7 +153,7 @@ impl TestCluster {
 
         // --- CORRECTNESS VERIFICATION ---
         let mut correctness_passed = true;
-        let final_commit = self.nodes[&1].commit_index;
+        let final_commit = self.sim[1].commit_index;
         for i in (0..final_commit).step_by(10) {
             let key = format!("k_{:06}", i);
             let expected_val = Value::String(format!("v_{}", i));

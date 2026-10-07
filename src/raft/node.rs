@@ -4,13 +4,29 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{database::Config, Database, wal::log_record::{Command, LogRecord, Value}};
+use crate::{
+    Database,
+    database::Config,
+    wal::log_record::{Command, LogRecord, Value},
+};
 
 use super::message::Message;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId {
     pub id: u64,
+}
+
+impl From<u64> for NodeId {
+    fn from(id: u64) -> Self {
+        NodeId { id }
+    }
+}
+
+impl From<NodeId> for u64 {
+    fn from(node_id: NodeId) -> Self {
+        node_id.id
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,12 +41,6 @@ pub struct LogEntry {
     pub term: u64,
     pub record: LogRecord,
 }
-
-// #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-// pub enum Command {
-//     Set(String, String),
-//     Delete(String),
-// }
 
 pub struct RaftNode {
     pub db: Database,
@@ -77,13 +87,13 @@ impl RaftNode {
         config: impl Into<Config>,
     ) -> Self {
         let config = config.into();
+        let now = Instant::now();
+
         let mut node = Self {
             id,
             peers,
-
             current_term: 0,
             voted_for: None,
-
             log: vec![LogEntry {
                 term: 0,
                 record: LogRecord::new(
@@ -94,45 +104,39 @@ impl RaftNode {
                     },
                 ),
             }],
-
             commit_index: 0,
             last_applied: 0,
-
             next_index: HashMap::new(),
             match_index: HashMap::new(),
-
             role: Role::Follower,
             votes_received: HashSet::new(),
             leader_id: None,
-
             outbox: Vec::new(),
-
-            election_deadline: Instant::now(),
-            heartbeat_deadline: Instant::now(),
-
+            election_deadline: now,
+            heartbeat_deadline: now,
             db: Database::open_in_dir(dir, config).unwrap(),
         };
 
-        node.reset_election_timeout();
+        node.reset_election_timeout(now);
 
         node
     }
 
-    pub fn submit_command(&mut self, cmd: Command) {
-        self.handle_message(Message::ClientCommand(cmd));
+    pub fn submit_command(&mut self, cmd: Command,now: Instant) {
+        self.handle_message(Message::ClientCommand(cmd),now);
     }
 
     pub fn get(&self, key: &str) -> std::io::Result<Option<Value>> {
         self.db.get(key)
     }
 
-    pub fn tick(&mut self) {
-        let now = Instant::now();
+    pub fn tick(&mut self, now: Instant) {
+        //let now = Instant::now();
 
         match self.role {
             Role::Follower | Role::Candidate => {
                 if now >= self.election_deadline {
-                    self.start_election();
+                    self.start_election(now);
                 }
             }
 
@@ -156,11 +160,11 @@ impl RaftNode {
         }
     }
 
-    pub fn step_down(&mut self, new_term: u64) {
+    pub fn step_down(&mut self, new_term: u64,now: Instant) {
         self.current_term = new_term;
         self.role = Role::Follower;
         self.voted_for = None;
         self.leader_id = None;
-        self.reset_election_timeout();
+        self.reset_election_timeout(now);
     }
 }

@@ -1,12 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Index, IndexMut};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use super::runtime::{Clock, Transport};
 use crate::database::Config;
 use crate::raft::message::Message;
 use crate::raft::node::{NodeId, RaftNode, Role};
+
+use super::runtime::{Clock, Transport};
 
 #[derive(Debug, Clone)]
 pub struct Event {
@@ -44,7 +45,11 @@ pub struct Simulation {
     pub clock: Arc<Mutex<Clock>>,
     pub events: Arc<Mutex<VecDeque<Event>>>,
     pub nodes: HashMap<NodeId, RaftNode>,
+
+    // Nodes that are completely unavailable.
     pub disabled_nodes: HashSet<NodeId>,
+
+    // Directed network links that are blocked.
     pub blocked_links: HashSet<(NodeId, NodeId)>,
 }
 
@@ -64,19 +69,23 @@ impl Simulation {
 
     pub fn new_cluster(ids: &[u64]) -> Self {
         let all_node_ids: Vec<NodeId> = ids.iter().map(|&id| NodeId { id }).collect();
+
         let mut nodes = HashMap::new();
 
         for &id in ids {
             let peers: Vec<NodeId> = all_node_ids
                 .iter()
-                .cloned()
+                .copied()
                 .filter(|node| node.id != id)
                 .collect();
 
-            nodes.insert(
-                NodeId { id },
-                RaftNode::new(NodeId { id }, peers, Config::default()),
-            );
+            let mut node = RaftNode::new(NodeId { id }, peers, Config::default());
+
+            let now = node.election_deadline;
+
+            node.set_election_timeout(Duration::from_millis(150 + id * 50), now);
+
+            nodes.insert(NodeId { id }, node);
         }
 
         Self::new(nodes)
@@ -88,14 +97,18 @@ impl Simulation {
 
     pub fn disable_node(&mut self, id: impl Into<NodeId>) {
         let node_id = id.into();
+
         self.disabled_nodes.insert(node_id);
+
         if let Some(node) = self.nodes.get_mut(&node_id) {
             node.outbox.clear();
         }
     }
 
     pub fn enable_node(&mut self, id: impl Into<NodeId>) {
-        self.disabled_nodes.remove(&id.into());
+        let node_id = id.into();
+
+        self.disabled_nodes.remove(&node_id);
     }
 
     pub fn block_link(&mut self, from: impl Into<NodeId>, to: impl Into<NodeId>) {
@@ -122,10 +135,16 @@ impl Simulation {
     pub fn start_election(&mut self, id: impl Into<NodeId>) {
         let node_id = id.into();
         let now = self.now();
+
+        if self.disabled_nodes.contains(&node_id) {
+            return;
+        }
+
         if let Some(node) = self.nodes.get_mut(&node_id) {
             node.start_election(now);
-            self.flush_node_outbox(node_id);
         }
+
+        self.flush_node_outbox(node_id);
     }
 
     pub fn get_leader(&self) -> Option<u64> {
@@ -134,7 +153,15 @@ impl Simulation {
                 return Some(node_id.id);
             }
         }
+
         None
+    }
+
+    pub fn leader_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|(id, node)| !self.disabled_nodes.contains(id) && node.role == Role::Leader)
+            .count()
     }
 
     pub fn deliver_next(&mut self) -> bool {
@@ -148,6 +175,8 @@ impl Simulation {
             events.pop_front().unwrap()
         };
 
+        // Move simulated time forward to the event's
+        // delivery time.
         {
             let mut clock = self.clock.lock().unwrap();
 
@@ -158,8 +187,9 @@ impl Simulation {
             }
         }
 
-        let now = self.clock.lock().unwrap().now();
+        let now = self.now();
 
+        // Simulate node failure and network partitions.
         if self.disabled_nodes.contains(&event.from)
             || self.disabled_nodes.contains(&event.to)
             || self.blocked_links.contains(&(event.from, event.to))
@@ -177,10 +207,12 @@ impl Simulation {
     }
 
     pub fn flush_node_outbox(&mut self, node_id: NodeId) {
+        // A disabled node cannot send anything.
         if self.disabled_nodes.contains(&node_id) {
             if let Some(node) = self.nodes.get_mut(&node_id) {
                 node.outbox.clear();
             }
+
             return;
         }
 
@@ -192,13 +224,12 @@ impl Simulation {
             }
         };
 
-        let clock = self.clock.lock().unwrap();
-        let now = clock.now();
-        drop(clock);
+        let now = self.now();
 
         let mut events = self.events.lock().unwrap();
 
         for (to, message) in messages {
+            // Timeout is handled internally by tick().
             if matches!(message, Message::Timeout) {
                 continue;
             }
@@ -214,6 +245,7 @@ impl Simulation {
 
     pub fn flush_all_outboxes(&mut self) {
         let node_ids: Vec<NodeId> = self.nodes.keys().copied().collect();
+
         for node_id in node_ids {
             self.flush_node_outbox(node_id);
         }
@@ -221,11 +253,16 @@ impl Simulation {
 
     pub fn run_until_idle(&mut self) {
         self.flush_all_outboxes();
+
         let mut steps = 0;
+
         while self.deliver_next() {
             steps += 1;
+
+            // Prevent an accidental infinite message loop
+            // from hanging a test.
             if steps > 1000 {
-                break;
+                panic!("simulation exceeded 1000 steps");
             }
         }
     }
@@ -240,7 +277,7 @@ impl Simulation {
             clock.advance(millis);
         }
 
-        let now = self.clock.lock().unwrap().now();
+        let now = self.now();
 
         let node_ids: Vec<NodeId> = self.nodes.keys().copied().collect();
 
@@ -286,3 +323,24 @@ impl IndexMut<NodeId> for Simulation {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn three_node_cluster_elects_one_leader() {
+        let mut sim = Simulation::new_cluster(&[1, 2, 3]);
+
+        assert_eq!(sim.get_leader(), None);
+        assert_eq!(sim.leader_count(), 0);
+
+        // Node 1 has a 200 ms election timeout.
+        sim.advance_time(200);
+
+        // Deliver RequestVote messages and responses.
+        sim.run_until_idle();
+
+        assert_eq!(sim.get_leader(), Some(1));
+        assert_eq!(sim.leader_count(), 1);
+    }
+}

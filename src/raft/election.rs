@@ -8,7 +8,7 @@ use super::{
 };
 
 impl RaftNode {
-    pub fn become_leader(&mut self,now: Instant) {
+    pub fn become_leader(&mut self, now: Instant) {
         self.role = Role::Leader;
         self.leader_id = Some(self.id);
 
@@ -29,7 +29,7 @@ impl RaftNode {
         }
     }
 
-    pub fn start_election(&mut self,now: Instant) {
+    pub fn start_election(&mut self, now: Instant) {
         self.role = Role::Candidate;
         self.leader_id = None;
 
@@ -74,7 +74,7 @@ impl RaftNode {
         }
     }
 
-    pub fn handle_vote_response(&mut self, response: RequestVoteResponse,now: Instant) {
+    pub fn handle_vote_response(&mut self, response: RequestVoteResponse, now: Instant) {
         // A newer term always wins.
         if response.term > self.current_term {
             self.step_down(response.term, now);
@@ -103,7 +103,11 @@ impl RaftNode {
         }
     }
 
-    pub fn handle_request_vote(&mut self, request: RequestVote, now: Instant) -> RequestVoteResponse {
+    pub fn handle_request_vote(
+        &mut self,
+        request: RequestVote,
+        now: Instant,
+    ) -> RequestVoteResponse {
         if request.term < self.current_term {
             return RequestVoteResponse {
                 term: self.current_term,
@@ -165,9 +169,20 @@ impl RaftNode {
         }
     }
 
-    pub fn reset_election_timeout(&mut self,now: Instant) {
-        let millis = rand::rng().random_range(150..=300);
+    pub fn reset_election_timeout(&mut self, now: Instant) {
+        let duration = match self.election_timeout {
+            Some(timeout) => timeout,
+            None => {
+                let millis = rand::rng().random_range(150..=300);
+                Duration::from_millis(millis)
+            }
+        };
 
-        self.election_deadline = now + Duration::from_millis(millis);
+        self.election_deadline = now + duration;
+    }
+
+    pub fn set_election_timeout(&mut self, timeout: Duration, now: Instant) {
+        self.election_timeout = Some(timeout);
+        self.election_deadline = now + timeout;
     }
 }

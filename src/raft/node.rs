@@ -42,6 +42,10 @@ pub struct LogEntry {
     pub record: LogRecord,
 }
 
+pub trait ElectionTimeout {
+    fn next_timeout(&mut self) -> Duration;
+}
+
 pub struct RaftNode {
     pub db: Database,
     pub id: NodeId,
@@ -71,6 +75,8 @@ pub struct RaftNode {
     // Election timeout
     pub election_deadline: Instant,
     pub heartbeat_deadline: Instant,
+
+    pub election_timeout: Option<Duration>,
 }
 
 impl RaftNode {
@@ -114,6 +120,7 @@ impl RaftNode {
             outbox: Vec::new(),
             election_deadline: now,
             heartbeat_deadline: now,
+            election_timeout:None,
             db: Database::open_in_dir(dir, config).unwrap(),
         };
 

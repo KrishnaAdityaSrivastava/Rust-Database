@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use kv_store::raft::{Network, NodeId, RaftNode};
 use kv_store::Config;
+use kv_store::raft::{Network, NodeId, RaftNode};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -10,6 +10,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut local_id_val: Option<u64> = None;
     let mut local_addr: Option<String> = None;
+    let mut api_addr: Option<String> = None;
     let mut peer_args: Vec<String> = Vec::new();
     let mut data_dir: Option<PathBuf> = None;
 
@@ -31,6 +32,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     local_addr = Some(args[i].clone());
+                }
+            }
+            "--api-addr" => {
+                i += 1;
+                if i < args.len() {
+                    api_addr = Some(args[i].clone());
                 }
             }
             "--peers" => {
@@ -70,8 +77,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if local_id_val.is_none() || local_addr.is_none() {
         eprintln!("Usage:");
-        eprintln!("  cargo run --bin node -- <id> <addr> [<peer_id>:<peer_addr> ...]");
-        eprintln!("  cargo run --bin node -- --id <id> --addr <addr> --peers <id:addr,id:addr> [--dir <path>]");
+        eprintln!(
+            "cargo run --bin node -- --id <id> --addr <raft_addr> --api-addr <api_addr> --peers <id:addr,id:addr> [--dir <path>]"
+        );
         eprintln!("\nExample:");
         eprintln!("  cargo run --bin node -- 1 127.0.0.1:6001 2:127.0.0.1:6002 3:127.0.0.1:6003");
         std::process::exit(1);
@@ -96,24 +104,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let dir = data_dir.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("kv_store_node_{}", id_num))
-    });
+    let api_addr = api_addr.unwrap_or_else(|| format!("127.0.0.1:{}", 7000 + id_num));
+
+    let dir =
+        data_dir.unwrap_or_else(|| std::env::temp_dir().join(format!("kv_store_node_{}", id_num)));
 
     println!("============================================================");
     println!(" Starting Raft Node {}", local_id.id);
     println!(" Address:   {}", addr);
+    println!(" API Addr:  {}", api_addr);
     println!(" Data Dir:  {}", dir.display());
     println!(" Peers:     {:?}", peers_map);
-    println!(" Logging:   {}", if verbose || std::env::var("RAFT_LOG").is_ok() { "ENABLED" } else { "DISABLED (use --log or RAFT_LOG=1 to enable)" });
+    println!(
+        " Logging:   {}",
+        if verbose || std::env::var("RAFT_LOG").is_ok() {
+            "ENABLED"
+        } else {
+            "DISABLED (use --log or RAFT_LOG=1 to enable)"
+        }
+    );
     println!("============================================================");
 
     let node = RaftNode::new_in_dir(&dir, local_id, peer_ids, Config::default());
     let network = Network::new(local_id, addr, peers_map);
 
-    let _tx = network.start(node).await;
+    let _tx = network.start(node, api_addr).await;
 
-    println!("Node {} is active and listening for peers/clients.", local_id.id);
+    println!(
+        "Node {} is active and listening for peers/clients.",
+        local_id.id
+    );
     println!("Press Ctrl+C to shut down cleanly.");
 
     tokio::signal::ctrl_c().await?;

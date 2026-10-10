@@ -6,9 +6,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::time::Duration;
 
+use crate::raft::service::ServiceRequest;
+
+use super::execution::runtime::{Runtime, Transport};
 use super::message::Message;
 use super::node::{NodeId, RaftNode};
-use super::execution::runtime::{Runtime, Transport};
 
 // struct OutgoingMessage {
 //     pub to: NodeId,
@@ -48,16 +50,27 @@ impl Network {
         }
     }
 
-    pub async fn start(self, node: RaftNode) -> UnboundedSender<Message> {
+    pub async fn start(self, node: RaftNode,api_addr: String) -> UnboundedSender<Message> {
         let local_id = self.local_id;
 
         let (node_tx, node_rx) = mpsc::unbounded_channel::<Message>();
+        let (service_tx, service_rx) = mpsc::unbounded_channel::<ServiceRequest>();
+
+        let listener_tx = service_tx.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) =
+                super::service::run_listener(api_addr, listener_tx).await
+            {
+                eprintln!("[API] Listener stopped: {e}");
+            }
+        });
 
         let transport = NetworkTransport {
             active_senders: self.active_senders.clone(),
         };
 
-        Runtime::new(node, transport).start(node_rx);
+        Runtime::new(node, transport).start(node_rx, service_rx);
 
         let acceptor_addr = self.local_addr.clone();
         let acceptor_senders = self.active_senders.clone();

@@ -4,6 +4,7 @@ pub mod network;
 pub mod node;
 pub mod replication;
 pub mod execution;
+pub mod service;
 
 pub use node::{LogEntry, NodeId, RaftNode, Role};
 

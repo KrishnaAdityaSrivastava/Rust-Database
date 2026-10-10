@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::wal::log_record::{Command, LogRecord};
+use crate::{raft::service::ServiceResponse, wal::log_record::{Command, LogRecord}};
 
 use super::{
     message::{AppendEntries, AppendEntriesResponse, Message},
@@ -37,7 +37,11 @@ impl RaftNode {
         }
     }
 
-    pub fn handle_append_entries(&mut self, entries: AppendEntries, now: Instant) -> AppendEntriesResponse {
+    pub fn handle_append_entries(
+        &mut self,
+        entries: AppendEntries,
+        now: Instant,
+    ) -> AppendEntriesResponse {
         if entries.term < self.current_term {
             return AppendEntriesResponse {
                 term: self.current_term,
@@ -108,7 +112,11 @@ impl RaftNode {
         }
     }
 
-    pub fn handle_append_entries_response(&mut self, response: AppendEntriesResponse,now: Instant) {
+    pub fn handle_append_entries_response(
+        &mut self,
+        response: AppendEntriesResponse,
+        now: Instant,
+    ) {
         if response.term > self.current_term {
             self.step_down(response.term, now);
             return;
@@ -174,12 +182,14 @@ impl RaftNode {
         self.apply_committed_entries();
     }
 
-    pub fn append_command(&mut self, command: Command) {
+    pub fn append_command(&mut self, command: Command) -> usize {
         assert_eq!(
             self.role,
             Role::Leader,
             "Only leader can append client commands"
         );
+
+        let index = self.log.len();
 
         self.log.push(LogEntry {
             term: self.current_term,
@@ -191,32 +201,53 @@ impl RaftNode {
         } else {
             for peer in self.peers.clone() {
                 let entries = self.make_append_entries(peer);
-
                 self.outbox.push((peer, Message::AppendEntries(entries)));
             }
         }
+
+        index
     }
 
     pub fn apply_committed_entries(&mut self) {
         while self.last_applied < self.commit_index {
-            self.last_applied += 1;
+            let index = self.last_applied + 1;
+            let term = self.log[index].term;
+            let command = self.log[index].record.command.clone();
 
-            let command = self.log[self.last_applied].record.command.clone();
+            let result = match command {
+                Command::Set { key, value } => self.db.insert(key, value).map(|_| ()),
 
-            match command {
-                Command::Set { ref key, ref value } => {
-                    let _ = self.db.insert(key.clone(), value.clone());
-                    if super::is_log_enabled() {
-                        println!("[NODE {}] Applied SET {} = {:?}", self.id.id, key, value);
-                    }
-                }
+                Command::Delete { key } => self.db.delete(key).map(|_| ()),
+            };
 
-                Command::Delete { ref key } => {
-                    let _ = self.db.delete(key.clone());
-                    if super::is_log_enabled() {
-                        println!("[NODE {}] Applied DELETE {}", self.id.id, key);
-                    }
-                }
+            self.last_applied = index;
+
+            if let Some(response_tx) = self.pending_service_writes.remove(&(index, term)) {
+                let response = match result {
+                    Ok(()) => ServiceResponse {
+                        success: true,
+                        value: None,
+                        message: format!("Write committed and applied at log index {index}"),
+                        leader_id: Some(self.id.id),
+                        term,
+                    },
+                    Err(err) => ServiceResponse {
+                        success: false,
+                        value: None,
+                        message: format!(
+                            "Log entry committed, but database application failed: {err}"
+                        ),
+                        leader_id: Some(self.id.id),
+                        term,
+                    },
+                };
+
+                let _ = response_tx.send(response);
+            } else if let Err(err) = result {
+                eprintln!(
+                    "Node {} failed to apply committed entry {}: {}",
+                    self.id.id, index, err
+                );
             }
         }
     }

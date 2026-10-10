@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
@@ -11,6 +12,8 @@ use crate::{
 };
 
 use super::message::Message;
+
+use super::service::ServiceResponse;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId {
@@ -77,6 +80,9 @@ pub struct RaftNode {
     pub heartbeat_deadline: Instant,
 
     pub election_timeout: Option<Duration>,
+
+    pub pending_service_writes:
+        HashMap<(usize, u64), tokio::sync::oneshot::Sender<ServiceResponse>>,
 }
 
 impl RaftNode {
@@ -120,8 +126,9 @@ impl RaftNode {
             outbox: Vec::new(),
             election_deadline: now,
             heartbeat_deadline: now,
-            election_timeout:None,
+            election_timeout: None,
             db: Database::open_in_dir(dir, config).unwrap(),
+            pending_service_writes: HashMap::new(),
         };
 
         node.reset_election_timeout(now);
@@ -129,8 +136,8 @@ impl RaftNode {
         node
     }
 
-    pub fn submit_command(&mut self, cmd: Command,now: Instant) {
-        self.handle_message(Message::ClientCommand(cmd),now);
+    pub fn submit_command(&mut self, cmd: Command, now: Instant) {
+        self.handle_message(Message::ClientCommand(cmd), now);
     }
 
     pub fn get(&self, key: &str) -> std::io::Result<Option<Value>> {
@@ -167,11 +174,22 @@ impl RaftNode {
         }
     }
 
-    pub fn step_down(&mut self, new_term: u64,now: Instant) {
+    pub fn step_down(&mut self, new_term: u64, now: Instant) {
         self.current_term = new_term;
         self.role = Role::Follower;
         self.voted_for = None;
         self.leader_id = None;
         self.reset_election_timeout(now);
+
+        for (_, response_tx) in self.pending_service_writes.drain() {
+            let _ = response_tx.send(ServiceResponse {
+                success: false,
+                value: None,
+                message: "Leadership changed before confirmation; write outcome may be uncertain"
+                    .into(),
+                leader_id: None,
+                term: new_term,
+            });
+        }
     }
 }

@@ -80,19 +80,24 @@ impl Value {
     pub fn from_bytes(data_type: DataType, bytes: Vec<u8>) -> io::Result<Self> {
         match data_type {
             DataType::Int => {
-                let bytes: [u8; 8] = bytes.try_into().map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid integer value length")
+                let value = String::from_utf8(bytes).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 integer value")
                 })?;
 
-                Ok(Self::Int(i64::from_le_bytes(bytes)))
+                value.parse::<i64>().map(Self::Int).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid integer value")
+                })
             }
 
             DataType::Float => {
-                let bytes: [u8; 8] = bytes.try_into().map_err(|_| {
-                    io::Error::new(io::ErrorKind::InvalidData, "invalid float value length")
+                let value = String::from_utf8(bytes).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 float value")
                 })?;
 
-                Ok(Self::Float(f64::from_le_bytes(bytes)))
+                value
+                    .parse::<f64>()
+                    .map(Self::Float)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid float value"))
             }
 
             DataType::String => String::from_utf8(bytes).map(Self::String).map_err(|_| {

@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 450" width="100%">
+  <rect width="1000" height="450" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+  
+  <!-- Header -->
+  <text x="500" y="45" text-anchor="middle" fill="#58a6ff" font-family="system-ui, sans-serif" font-size="22" font-weight="700">System Architecture &amp; Dual-Ingress Flow</text>
+
+  <!-- Boxes -->
+  <!-- Client API -->
+  <rect x="50" y="90" width="220" height="70" rx="8" fill="#161b22" stroke="#30363d" stroke-width="1.5"/>
+  <text x="160" y="120" text-anchor="middle" fill="#f0f6fc" font-family="sans-serif" font-size="15" font-weight="600">REST HTTP Client</text>
+  <text x="160" y="142" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="12">JSON over HTTP</text>
+
+  <!-- Go Proxy -->
+  <rect x="50" y="210" width="220" height="70" rx="8" fill="#1f242d" stroke="#00add8" stroke-width="1.5"/>
+  <text x="160" y="240" text-anchor="middle" fill="#00add8" font-family="sans-serif" font-size="15" font-weight="600">Go REST Proxy</text>
+  <text x="160" y="262" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="12">Port 8080 ➔ Port 700x</text>
+
+  <!-- Raft Peers -->
+  <rect x="50" y="330" width="220" height="70" rx="8" fill="#161b22" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="160" y="360" text-anchor="middle" fill="#c084fc" font-family="sans-serif" font-size="15" font-weight="600">Raft CLI / Peers</text>
+  <text x="160" y="382" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="12">Bincode TCP (Port 600x)</text>
+
+  <!-- Core Engine -->
+  <rect x="390" y="150" width="230" height="150" rx="10" fill="#161b22" stroke="#f97316" stroke-width="2"/>
+  <text x="505" y="185" text-anchor="middle" fill="#f97316" font-family="sans-serif" font-size="17" font-weight="700">Unified Core Engine</text>
+  <text x="505" y="215" text-anchor="middle" fill="#f0f6fc" font-family="sans-serif" font-size="13">StoreRequest Adapter</text>
+  <text x="505" y="240" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="12">Leadership &amp; Routing</text>
+  <text x="505" y="265" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="12">Responder (Oneshot/Outbox)</text>
+
+  <!-- Storage Engine -->
+  <rect x="730" y="90" width="220" height="130" rx="8" fill="#161b22" stroke="#238636" stroke-width="1.5"/>
+  <text x="840" y="125" text-anchor="middle" fill="#3fb950" font-family="sans-serif" font-size="16" font-weight="600">LSM Engine</text>
+  <text x="840" y="155" text-anchor="middle" fill="#f0f6fc" font-family="sans-serif" font-size="13">WAL + MemTable</text>
+  <text x="840" y="180" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="12">SSTable Point Lookups</text>
+
+  <rect x="730" y="260" width="220" height="100" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
+  <text x="840" y="295" text-anchor="middle" fill="#d29922" font-family="sans-serif" font-size="16" font-weight="600">Streaming Merger</text>
+  <text x="840" y="325" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="12">Heap Compaction O(K)</text>
+
+  <!-- Connectors -->
+  <path d="M 160 160 L 160 210" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M 270 245 L 390 225" stroke="#00add8" stroke-width="2" fill="none"/>
+  <path d="M 270 365 L 340 365 L 340 250 L 390 250" stroke="#a855f7" stroke-width="2" fill="none"/>
+  <path d="M 620 200 L 730 155" stroke="#3fb950" stroke-width="2" fill="none"/>
+  <path d="M 840 220 L 840 260" stroke="#238636" stroke-width="2" fill="none"/>
+</svg>

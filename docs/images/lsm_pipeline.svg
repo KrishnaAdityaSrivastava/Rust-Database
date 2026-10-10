@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 300" width="100%">
+  <rect width="900" height="300" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+  <text x="450" y="40" text-anchor="middle" fill="#3fb950" font-family="system-ui, sans-serif" font-size="20" font-weight="700">LSM Storage Pipeline</text>
+
+  <!-- Node 1: Write -->
+  <rect x="50" y="110" width="140" height="80" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
+  <text x="120" y="145" text-anchor="middle" fill="#58a6ff" font-family="sans-serif" font-size="15" font-weight="600">Client Write</text>
+  <text x="120" y="168" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="12">Set / Delete</text>
+
+  <!-- Node 2: WAL -->
+  <rect x="250" y="80" width="150" height="60" rx="8" fill="#161b22" stroke="#f85149" stroke-width="1.5"/>
+  <text x="325" y="115" text-anchor="middle" fill="#f85149" font-family="sans-serif" font-size="14" font-weight="600">1. WAL Log</text>
+
+  <!-- Node 3: MemTable -->
+  <rect x="250" y="160" width="150" height="60" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
+  <text x="325" y="195" text-anchor="middle" fill="#d29922" font-family="sans-serif" font-size="14" font-weight="600">2. MemTable</text>
+
+  <!-- Node 4: SSTable -->
+  <rect x="470" y="160" width="160" height="60" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
+  <text x="550" y="185" text-anchor="middle" fill="#3fb950" font-family="sans-serif" font-size="14" font-weight="600">3. SSTable</text>
+  <text x="550" y="205" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="11">Index + Binary Search</text>
+
+  <!-- Node 5: Compaction -->
+  <rect x="700" y="160" width="150" height="60" rx="8" fill="#161b22" stroke="#a855f7" stroke-width="1.5"/>
+  <text x="775" y="185" text-anchor="middle" fill="#c084fc" font-family="sans-serif" font-size="14" font-weight="600">4. Compaction</text>
+  <text x="775" y="205" text-anchor="middle" fill="#8b949e" font-family="sans-serif" font-size="11">Streaming Heap Merge</text>
+
+  <!-- Arrows -->
+  <path d="M 190 130 L 250 110" stroke="#8b949e" stroke-width="1.5" fill="none"/>
+  <path d="M 190 170 L 250 190" stroke="#8b949e" stroke-width="1.5" fill="none"/>
+  <path d="M 400 190 L 470 190" stroke="#d29922" stroke-width="1.5" fill="none"/>
+  <path d="M 630 190 L 700 190" stroke="#3fb950" stroke-width="1.5" fill="none"/>
+</svg>

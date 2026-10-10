@@ -1,9 +1,10 @@
 use std::io::{self, Write};
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use kv_store::lsm::wal::log_record::{Command, Value};
 use kv_store::raft::{ClientQuery, ClientRequest, ClientResponse, Message, NodeId, StatusQuery};
-use kv_store::wal::log_record::{Command, Value};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

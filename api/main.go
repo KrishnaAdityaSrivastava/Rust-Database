@@ -21,9 +21,9 @@ const (
 )
 
 var rustNodes = map[uint64]string{
-    1: "127.0.0.1:7001",
-    2: "127.0.0.1:7002",
-    3: "127.0.0.1:7003",
+	1: "127.0.0.1:7001",
+	2: "127.0.0.1:7002",
+	3: "127.0.0.1:7003",
 }
 
 type WireValue struct {
@@ -72,7 +72,7 @@ func validateValue(v WireValue) error {
 	return nil
 }
 
-func callRust(ctx context.Context,addr string, req WireRequest) (WireResponse, error) {
+func callRust(ctx context.Context, addr string, req WireRequest) (WireResponse, error) {
 	var result WireResponse
 
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
@@ -114,20 +114,83 @@ func forwardRust(w http.ResponseWriter, r *http.Request, req WireRequest) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
-	resp, err := callRust(ctx, addr, req)
-	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{
-			"error": err.Error(),
-		})
+	// Try the preferred node first, then the remaining nodes.
+	candidates := []string{rustAddr}
+	for _, addr := range rustNodes {
+		if addr != rustAddr {
+			candidates = append(candidates, addr)
+		}
+	}
+
+	tried := make(map[string]bool)
+	var lastResp WireResponse
+	var lastErr error
+	gotResponse := false
+
+	for len(candidates) > 0 {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+
+		target := candidates[0]
+		candidates = candidates[1:]
+
+		if tried[target] {
+			continue
+		}
+		tried[target] = true
+
+		resp, err := callRust(ctx, target, req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		lastResp = resp
+		gotResponse = true
+
+		// Prefer the known leader if this node identifies one.
+		if resp.LeaderID != nil {
+			if leaderAddr, ok := rustNodes[*resp.LeaderID]; ok &&
+				!tried[leaderAddr] {
+
+				// Prioritize the leader over the remaining candidates.
+				candidates = append(
+					[]string{leaderAddr},
+					candidates...,
+				)
+
+				if !resp.Success {
+					continue
+				}
+			}
+		}
+
+		// Return a completed operation response.
+		if resp.Success {
+			writeJSON(w, http.StatusOK, resp)
+			return
+		}
+
+		// A failure without a known leader may be recoverable
+		// by trying another node.
+	}
+
+	if gotResponse {
+		status := http.StatusConflict
+		if ctx.Err() != nil {
+			status = http.StatusGatewayTimeout
+		}
+		writeJSON(w, status, lastResp)
 		return
 	}
 
-	status := http.StatusOK
-	if !resp.Success {
-		status = http.StatusConflict
-	}
-
-	writeJSON(w, status, resp)
+	writeJSON(w, http.StatusBadGateway, map[string]string{
+		"error": fmt.Sprintf(
+			"no Rust node responded successfully; last error: %v",
+			lastErr,
+		),
+	})
 }
 
 func handleKV(w http.ResponseWriter, r *http.Request) {

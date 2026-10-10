@@ -1,23 +1,22 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 pub mod election;
 pub mod message;
 pub mod network;
 pub mod node;
 pub mod replication;
-pub mod execution;
-pub mod service;
-
-pub use node::{LogEntry, NodeId, RaftNode, Role};
+pub mod request;
 
 pub use message::{
     AppendEntries, AppendEntriesResponse, ClientQuery, ClientRequest, ClientResponse, Message,
     RequestVote, RequestVoteResponse, StatusQuery,
 };
-
 pub use network::Network;
-pub use execution::simulator::{Event, Simulation};
-pub use execution::runtime::{Clock, Runtime, Transport};
+pub use node::{LogEntry, NodeId, RaftNode, Role};
+pub use request::{Responder, StoreOperation, StoreRequest};
 
-use std::sync::atomic::{AtomicBool, Ordering};
+pub use crate::runtime::runtime::{Clock, Runtime, Transport};
+pub use crate::runtime::simulator::{Event, Simulation};
 
 static LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 

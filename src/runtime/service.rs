@@ -1,4 +1,4 @@
-use crate::wal::log_record::{Command, Value};
+use crate::lsm::wal::log_record::Value;
 
 use serde::{Deserialize, Serialize};
 use std::io;
@@ -80,7 +80,7 @@ pub async fn run_listener(
 ) -> io::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
 
-    if super::is_log_enabled() {
+    if crate::raft::is_log_enabled() {
         eprintln!("[API] Listening on {addr}");
     }
 

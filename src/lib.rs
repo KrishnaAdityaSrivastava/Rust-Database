@@ -1,12 +1,12 @@
 pub mod database;
 pub mod lsm;
 pub mod raft;
-pub mod wal;
+pub mod runtime;
 
-pub use database::{Config, Config as DbConfig, Config as DatabaseConfig, Database};
+pub use lsm::wal;
+
+pub use database::{Config, Config as DatabaseConfig, Config as DbConfig, Database};
 pub use lsm::sstable::SSTable;
+pub use lsm::wal::log_record::Command;
+pub use lsm::wal::Logger;
 pub use raft::{Clock, Event, Message, Network, NodeId, RaftNode, Role, Simulation};
-
-pub use wal::Logger;
-
-pub use wal::log_record::Command;

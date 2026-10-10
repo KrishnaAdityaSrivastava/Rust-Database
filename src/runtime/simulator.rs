@@ -79,16 +79,18 @@ impl Simulation {
                 .filter(|node| node.id != id)
                 .collect();
 
-            let mut node = RaftNode::new(NodeId { id }, peers, Config::default());
-
-            let now = node.election_deadline;
-
-            node.set_election_timeout(Duration::from_millis(150 + id * 50), now);
-
+            let node = RaftNode::new(NodeId { id }, peers, Config::default());
             nodes.insert(NodeId { id }, node);
         }
 
-        Self::new(nodes)
+        let mut sim = Self::new(nodes);
+        let now = sim.now();
+        for (&id, node) in sim.nodes.iter_mut() {
+            let timeout = Duration::from_millis(150 + id.id * 50);
+            node.set_election_timeout(timeout, now);
+        }
+
+        sim
     }
 
     pub fn now(&self) -> Instant {

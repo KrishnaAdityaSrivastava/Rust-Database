@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use crate::{raft::service::ServiceResponse, wal::log_record::{Command, LogRecord}};
+use crate::lsm::wal::log_record::{Command, LogRecord};
 
 use super::{
     message::{AppendEntries, AppendEntriesResponse, Message},
@@ -222,27 +222,28 @@ impl RaftNode {
 
             self.last_applied = index;
 
-            if let Some(response_tx) = self.pending_service_writes.remove(&(index, term)) {
-                let response = match result {
-                    Ok(()) => ServiceResponse {
-                        success: true,
-                        value: None,
-                        message: format!("Write committed and applied at log index {index}"),
-                        leader_id: Some(self.id.id),
-                        term,
-                    },
-                    Err(err) => ServiceResponse {
-                        success: false,
-                        value: None,
-                        message: format!(
-                            "Log entry committed, but database application failed: {err}"
-                        ),
-                        leader_id: Some(self.id.id),
-                        term,
-                    },
+            if let Some(responder) = self.pending_requests.remove(&(index, term)) {
+                let (success, message) = match result {
+                    Ok(()) => (true, format!("Write committed and applied at log index {index}")),
+                    Err(err) => (
+                        false,
+                        format!("Log entry committed, but database application failed: {err}"),
+                    ),
                 };
 
-                let _ = response_tx.send(response);
+                let leader_id = self.leader_id.or(Some(self.id));
+                let id = self.id;
+                let role = self.role;
+                responder.send(
+                    success,
+                    None,
+                    message,
+                    leader_id,
+                    term,
+                    id,
+                    role,
+                    &mut self.outbox,
+                );
             } else if let Err(err) = result {
                 eprintln!(
                     "Node {} failed to apply committed entry {}: {}",

@@ -12,8 +12,7 @@ use crate::{
 };
 
 use super::message::Message;
-
-use super::service::ServiceResponse;
+use super::request::{Responder, StoreOperation, StoreRequest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeId {
@@ -81,8 +80,7 @@ pub struct RaftNode {
 
     pub election_timeout: Option<Duration>,
 
-    pub pending_service_writes:
-        HashMap<(usize, u64), tokio::sync::oneshot::Sender<ServiceResponse>>,
+    pub pending_requests: HashMap<(usize, u64), Responder>,
 }
 
 impl RaftNode {
@@ -128,12 +126,105 @@ impl RaftNode {
             heartbeat_deadline: now,
             election_timeout: None,
             db: Database::open_in_dir(dir, config).unwrap(),
-            pending_service_writes: HashMap::new(),
+            pending_requests: HashMap::new(),
         };
 
         node.reset_election_timeout(now);
 
         node
+    }
+
+    pub fn handle_store_request(&mut self, request: StoreRequest, _now: Instant) {
+        match request.operation {
+            StoreOperation::Set { key, value } => {
+                self.submit_store_write(Command::Set { key, value }, request.responder);
+            }
+            StoreOperation::Delete { key } => {
+                self.submit_store_write(Command::Delete { key }, request.responder);
+            }
+            StoreOperation::Get { key } => {
+                let (success, value, message) = match self.get(&key) {
+                    Ok(val) => (true, val, format!("Read from Node {}", self.id.id)),
+                    Err(err) => (false, None, err.to_string()),
+                };
+                let leader_id = self.leader_id;
+                let current_term = self.current_term;
+                let id = self.id;
+                let role = self.role;
+                request.responder.send(
+                    success,
+                    value,
+                    message,
+                    leader_id,
+                    current_term,
+                    id,
+                    role,
+                    &mut self.outbox,
+                );
+            }
+            StoreOperation::Status => {
+                let leader_id = self.leader_id;
+                let current_term = self.current_term;
+                let id = self.id;
+                let role = self.role;
+                request.responder.send(
+                    true,
+                    None,
+                    format!("Node status OK (role: {:?})", self.role),
+                    leader_id,
+                    current_term,
+                    id,
+                    role,
+                    &mut self.outbox,
+                );
+            }
+        }
+    }
+
+    fn submit_store_write(&mut self, command: Command, responder: Responder) {
+        if self.role != Role::Leader {
+            let msg = if let Some(leader) = self.leader_id {
+                format!("Not leader; current leader is Node {}", leader.id)
+            } else {
+                format!("Node {} is not leader and no leader is currently known", self.id.id)
+            };
+            let leader_id = self.leader_id;
+            let current_term = self.current_term;
+            let id = self.id;
+            let role = self.role;
+            responder.send(
+                false,
+                None,
+                msg,
+                leader_id,
+                current_term,
+                id,
+                role,
+                &mut self.outbox,
+            );
+            return;
+        }
+
+        let index = self.append_command(command);
+        let term = self.log[index].term;
+
+        if self.last_applied >= index {
+            let leader_id = self.leader_id;
+            let id = self.id;
+            let role = self.role;
+            responder.send(
+                true,
+                None,
+                format!("Write committed and applied at log index {index}"),
+                leader_id.or(Some(id)),
+                term,
+                id,
+                role,
+                &mut self.outbox,
+            );
+        } else {
+            self.pending_requests.insert((index, term), responder);
+        }
     }
 
     pub fn submit_command(&mut self, cmd: Command, now: Instant) {
@@ -145,8 +236,6 @@ impl RaftNode {
     }
 
     pub fn tick(&mut self, now: Instant) {
-        //let now = Instant::now();
-
         match self.role {
             Role::Follower | Role::Candidate => {
                 if now >= self.election_deadline {
@@ -181,15 +270,19 @@ impl RaftNode {
         self.leader_id = None;
         self.reset_election_timeout(now);
 
-        for (_, response_tx) in self.pending_service_writes.drain() {
-            let _ = response_tx.send(ServiceResponse {
-                success: false,
-                value: None,
-                message: "Leadership changed before confirmation; write outcome may be uncertain"
-                    .into(),
-                leader_id: None,
-                term: new_term,
-            });
+        let id = self.id;
+        let role = self.role;
+        for (_, responder) in self.pending_requests.drain() {
+            responder.send(
+                false,
+                None,
+                "Leadership changed before confirmation; write outcome may be uncertain".into(),
+                None,
+                new_term,
+                id,
+                role,
+                &mut self.outbox,
+            );
         }
     }
 }

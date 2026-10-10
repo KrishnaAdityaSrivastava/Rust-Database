@@ -1,8 +1,10 @@
-use crate::{raft::RaftNode};
 use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+
+use super::node::{LogEntry, NodeId, RaftNode};
+use super::request::{Responder, StoreOperation, StoreRequest};
 use crate::wal::log_record::Command;
-use super::node::{LogEntry, NodeId};
-use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendEntries {
@@ -149,127 +151,40 @@ impl RaftNode {
             }
 
             Message::ClientRequest(req) => {
-                let client_id = req.client_id;
-                let req_id = req.request_id;
-
-                if super::is_log_enabled() {
-                    println!(
-                        "[NODE {}] Received ClientRequest ({:?}) from Client {}",
-                        self.id.id,
-                        req.command,
-                        client_id.id
-                    );
-                }
-
-                if self.role == crate::raft::Role::Leader {
-                    self.append_command(req.command.clone());
-
-                    self.outbox.push((
-                        client_id,
-                        Message::ClientResponse(ClientResponse {
-                            request_id: req_id,
-                            success: true,
-                            value: None,
-                            message: format!(
-                                "Command processed on Leader Node {}",
-                                self.id.id
-                            ),
-                            leader_id: Some(self.id),
-                            node_id: self.id,
-                            role: format!("{:?}", self.role),
-                            term: self.current_term,
-                        }),
-                    ));
-                } else if let Some(leader_id) = self.leader_id {
-                    if super::is_log_enabled() {
-                        println!(
-                            "[NODE {}] Forwarding client request to Leader Node {}",
-                            self.id.id,
-                            leader_id.id
-                        );
-                    }
-
-                    self.outbox.push((
-                        client_id,
-                        Message::ClientResponse(ClientResponse {
-                            request_id: req_id,
-                            success: true,
-                            value: None,
-                            message: format!(
-                                "Node {} (Follower) forwarded request to Leader Node {}",
-                                self.id.id,
-                                leader_id.id
-                            ),
-                            leader_id: Some(leader_id),
-                            node_id: self.id,
-                            role: format!("{:?}", self.role),
-                            term: self.current_term,
-                        }),
-                    ));
-
-                    self.outbox.push((
-                        leader_id,
-                        Message::ClientRequest(req),
-                    ));
-                } else {
-                    if super::is_log_enabled() {
-                        println!(
-                            "[NODE {}] Rejecting client request: no leader known yet",
-                            self.id.id
-                        );
-                    }
-
-                    self.outbox.push((
-                        client_id,
-                        Message::ClientResponse(ClientResponse {
-                            request_id: req_id,
-                            success: false,
-                            value: None,
-                            message: format!(
-                                "Node {} is not leader and no leader is currently known",
-                                self.id.id
-                            ),
-                            leader_id: None,
-                            node_id: self.id,
-                            role: format!("{:?}", self.role),
-                            term: self.current_term,
-                        }),
-                    ));
-                }
+                let operation = match req.command {
+                    Command::Set { key, value } => StoreOperation::Set { key, value },
+                    Command::Delete { key } => StoreOperation::Delete { key },
+                };
+                let store_req = StoreRequest {
+                    operation,
+                    responder: Responder::RaftClient {
+                        client_id: req.client_id,
+                        request_id: req.request_id,
+                    },
+                };
+                self.handle_store_request(store_req, now);
             }
 
             Message::ClientQuery(query) => {
-                let val = self.db.get(&query.key).unwrap_or(None);
-
-                self.outbox.push((
-                    query.client_id,
-                    Message::ClientResponse(ClientResponse {
+                let store_req = StoreRequest {
+                    operation: StoreOperation::Get { key: query.key },
+                    responder: Responder::RaftClient {
+                        client_id: query.client_id,
                         request_id: query.request_id,
-                        success: true,
-                        value: val,
-                        message: format!("Read from Node {}", self.id.id),
-                        leader_id: self.leader_id,
-                        node_id: self.id,
-                        role: format!("{:?}", self.role),
-                        term: self.current_term,
-                    }),
-                ));
+                    },
+                };
+                self.handle_store_request(store_req, now);
             }
 
             Message::StatusQuery(query) => {
-                self.outbox.push((
-                    query.client_id,
-                    Message::ClientResponse(ClientResponse {
+                let store_req = StoreRequest {
+                    operation: StoreOperation::Status,
+                    responder: Responder::RaftClient {
+                        client_id: query.client_id,
                         request_id: query.request_id,
-                        success: true,
-                        value: None,
-                        message: "Node status OK".to_string(),
-                        leader_id: self.leader_id,
-                        node_id: self.id,
-                        role: format!("{:?}", self.role),
-                        term: self.current_term,
-                    }),
-                ));
+                    },
+                };
+                self.handle_store_request(store_req, now);
             }
 
             Message::ClientResponse(_) => {}

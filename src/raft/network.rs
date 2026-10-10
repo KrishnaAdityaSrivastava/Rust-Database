@@ -1,16 +1,15 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, UnboundedSender};
-use tokio::time::Duration;
 
-use crate::raft::service::ServiceRequest;
-
-use super::execution::runtime::{Runtime, Transport};
 use super::message::Message;
 use super::node::{NodeId, RaftNode};
+use crate::runtime::runtime::{Runtime, Transport};
+use crate::runtime::service::ServiceRequest;
 
 // struct OutgoingMessage {
 //     pub to: NodeId,
@@ -50,7 +49,12 @@ impl Network {
         }
     }
 
-    pub async fn start(self, node: RaftNode,api_addr: String) -> UnboundedSender<Message> {
+    pub async fn start(self, node: RaftNode) -> UnboundedSender<Message> {
+        let api_addr = "127.0.0.1:0".to_string();
+        self.start_with_api(node, api_addr).await
+    }
+
+    pub async fn start_with_api(self, node: RaftNode, api_addr: String) -> UnboundedSender<Message> {
         let local_id = self.local_id;
 
         let (node_tx, node_rx) = mpsc::unbounded_channel::<Message>();
@@ -60,9 +64,11 @@ impl Network {
 
         tokio::spawn(async move {
             if let Err(e) =
-                super::service::run_listener(api_addr, listener_tx).await
+                crate::runtime::service::run_listener(api_addr, listener_tx).await
             {
-                eprintln!("[API] Listener stopped: {e}");
+                if super::is_log_enabled() {
+                    eprintln!("[API] Listener stopped: {e}");
+                }
             }
         });
 

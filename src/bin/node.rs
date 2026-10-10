@@ -128,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = RaftNode::new_in_dir(&dir, local_id, peer_ids, Config::default());
     let network = Network::new(local_id, addr, peers_map);
 
-    let _tx = network.start(node, api_addr).await;
+    let _tx = network.start_with_api(node, api_addr).await;
 
     println!(
         "Node {} is active and listening for peers/clients.",

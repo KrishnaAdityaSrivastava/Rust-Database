@@ -396,16 +396,26 @@ impl Simulation {
     }
 
     pub fn get_leader(&self) -> Option<u64> {
+        let mut best: Option<(u64, u64)> = None; // (current_term, node_id)
         for (&node_id, node) in &self.nodes {
             if !self.disabled_nodes.contains(&node_id)
                 && !self.paused_nodes.contains(&node_id)
                 && node.role == Role::Leader
             {
-                return Some(node_id.id);
+                match best {
+                    Some((best_term, _)) => {
+                        if node.current_term > best_term {
+                            best = Some((node.current_term, node_id.id));
+                        }
+                    }
+                    None => {
+                        best = Some((node.current_term, node_id.id));
+                    }
+                }
             }
         }
 
-        None
+        best.map(|(_, id)| id)
     }
 
     pub fn leader_count(&self) -> usize {

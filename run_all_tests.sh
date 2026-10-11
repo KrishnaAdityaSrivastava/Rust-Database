@@ -10,7 +10,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BOLD}${CYAN}==========================================================================================${NC}"
-echo -e "${BOLD}${CYAN}                 KV-STORE AUTOMATED MASTER TEST & BENCHMARK SUITE                         ${NC}"
+echo -e "${BOLD}${CYAN}                 KV-STORE AUTOMATED MASTER CORRECTNESS TEST SUITE                         ${NC}"
 echo -e "${BOLD}${CYAN}==========================================================================================${NC}"
 echo ""
 
@@ -18,7 +18,7 @@ export RUSTFLAGS="-C target-cpu=native"
 #export RAFT_LOG=1
 
 PASS_COUNT=0
-TOTAL_SUITES=4
+TOTAL_SUITES=5
 
 run_suite() {
     local suite_name="$1"
@@ -41,14 +41,17 @@ run_suite() {
 # Phase 1: Storage Engine Unit Correctness
 run_suite "LSM Storage Engine Correctness" "correctness" ""
 
-# Phase 2: Raft Consensus Fault Tolerance & Invariants (13 tests)
+# Phase 2: Raft Consensus Fault Tolerance & Invariants
 run_suite "Raft Consensus Fault Tolerance" "raft_fault_tolerance" ""
 
-# Phase 3: Tokio TCP Networking & Framing
+# Phase 3: Deterministic Fault Injection & Chaos Simulation
+run_suite "Deterministic Fault Injection & Invariants" "deterministic_fault_injection" ""
+
+# Phase 4: Tokio TCP Networking & Framing
 run_suite "Tokio TCP Networking & Serialization" "raft_network" ""
 
-# Phase 4: Unified Performance, Resource Footprint & Cluster Stress Suite
-run_suite "Unified Performance & System Stress Suite" "unified_suite" "--release -- --nocapture"
+# Phase 5: Storage Engine & Cluster Stress Correctness
+run_suite "Unified Storage & Cluster Correctness" "unified_suite" ""
 
 echo -e "${BOLD}${CYAN}==========================================================================================${NC}"
 echo -e "${BOLD}${GREEN}                        ALL ${PASS_COUNT}/${TOTAL_SUITES} TEST SUITES PASSED SUCCESSFULLY!                         ${NC}"

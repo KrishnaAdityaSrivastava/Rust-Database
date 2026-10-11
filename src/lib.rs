@@ -2,6 +2,7 @@ pub mod database;
 pub mod lsm;
 pub mod raft;
 pub mod runtime;
+pub mod testing;
 
 pub use lsm::wal;
 

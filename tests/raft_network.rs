@@ -114,7 +114,7 @@ fn test_message_serialization() {
 }
 
 #[tokio::test]
-async fn test_tcp_network_cluster_throughput() {
+async fn test_tcp_network_batch_replication() {
     let id1 = NodeId { id: 201 };
     let id2 = NodeId { id: 202 };
     let id3 = NodeId { id: 203 };
@@ -151,22 +151,17 @@ async fn test_tcp_network_cluster_throughput() {
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
     let num_ops = 5000;
-    let start = std::time::Instant::now();
 
     for i in 0..num_ops {
-        let _ = tx1.send(Message::ClientCommand(Command::Set {
+        let res = tx1.send(Message::ClientCommand(Command::Set {
             key: format!("key_{:05}", i),
             value: Value::String(format!("val_{}", i)),
         }));
+        assert!(res.is_ok(), "Client command must be successfully enqueued to leader");
     }
 
-    // Allow messages to transmit and commit
+    // Allow messages to transmit and commit across the TCP network
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let elapsed = start.elapsed();
-    println!(
-        "Tokio TCP 3-Node Network throughput benchmark: sent {} ops in {:?}",
-        num_ops, elapsed
-    );
 }
 
 #[tokio::test]

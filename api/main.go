@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io"
 	"log"
 	"net"
@@ -17,13 +19,36 @@ import (
 
 const (
 	httpAddr = ":8080"
-	rustAddr = "127.0.0.1:7001"
+	rustAddr = "node1:7001"
 )
 
 var rustNodes = map[uint64]string{
-	1: "127.0.0.1:7001",
-	2: "127.0.0.1:7002",
-	3: "127.0.0.1:7003",
+	1: "node1:7001",
+	2: "node2:7002",
+	3: "node3:7003",
+}
+
+var (
+	apiRequests = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "kvraft_api_requests_total",
+			Help: "Total HTTP requests received by the API gateway.",
+		},
+		[]string{"method", "route", "status"},
+	)
+
+	apiRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "kvraft_api_request_duration_seconds",
+			Help:    "HTTP request duration in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "route"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(apiRequests, apiRequestDuration)
 }
 
 type WireValue struct {
@@ -108,6 +133,65 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sr *statusRecorder) WriteHeader(status int) {
+	if sr.status != 0 {
+		return
+	}
+	sr.status = status
+	sr.ResponseWriter.WriteHeader(status)
+}
+
+func (sr *statusRecorder) Write(b []byte) (int, error) {
+	if sr.status == 0 {
+		sr.WriteHeader(http.StatusOK)
+	}
+	return sr.ResponseWriter.Write(b)
+}
+
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		recorder := &statusRecorder{
+			ResponseWriter: w,
+		}
+
+		next.ServeHTTP(recorder, r)
+
+		status := recorder.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+
+		// Use route labels, not arbitrary URL paths or keys.
+		route := "unmatched"
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/kv/"):
+			route = "/kv/{key}"
+		case r.URL.Path == "/status":
+			route = "/status"
+		case r.URL.Path == "/metrics":
+			route = "/metrics"
+		}
+
+		apiRequests.WithLabelValues(
+			r.Method,
+			route,
+			fmt.Sprintf("%d", status),
+		).Inc()
+
+		apiRequestDuration.WithLabelValues(
+			r.Method,
+			route,
+		).Observe(time.Since(start).Seconds())
+	})
 }
 
 func forwardRust(w http.ResponseWriter, r *http.Request, req WireRequest) {
@@ -268,10 +352,11 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/kv/", handleKV)
 	mux.HandleFunc("/status", handleStatus)
+	mux.Handle("/metrics", promhttp.Handler())
 
 	server := &http.Server{
 		Addr:              httpAddr,
-		Handler:           mux,
+		Handler:           metricsMiddleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

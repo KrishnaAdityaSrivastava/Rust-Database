@@ -1,0 +1,113 @@
+services:
+  node1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - "1"
+      - "0.0.0.0:6001"
+      - "2:node2:6002"
+      - "3:node3:6003"
+      - "--api-addr"
+      - "0.0.0.0:7001"
+      - "--log"
+      - "--dir"
+      - "/data"
+    ports:
+      - "6001:6001"
+      - "7001:7001"
+    volumes:
+      - node1_data:/data
+    networks:
+      - kvnet
+
+  node2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - "2"
+      - "0.0.0.0:6002"
+      - "1:node1:6001"
+      - "3:node3:6003"
+      - "--api-addr"
+      - "0.0.0.0:7002"
+      - "--log"
+      - "--dir"
+      - "/data"
+    ports:
+      - "6002:6002"
+      - "7002:7002"
+    volumes:
+      - node2_data:/data
+    networks:
+      - kvnet
+
+  node3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - "3"
+      - "0.0.0.0:6003"
+      - "1:node1:6001"
+      - "2:node2:6002"
+      - "--api-addr"
+      - "0.0.0.0:7003"
+      - "--log"
+      - "--dir"
+      - "/data"
+    ports:
+      - "6003:6003"
+      - "7003:7003"
+    volumes:
+      - node3_data:/data
+    networks:
+      - kvnet
+
+  prometheus:
+    image: prom/prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    networks:
+      - kvnet
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - kvnet
+    depends_on:
+      - prometheus
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - node1
+      - node2
+      - node3
+    networks:
+      - kvnet
+
+networks:
+  kvnet:
+
+volumes:
+  node1_data:
+  node2_data:
+  node3_data:
+  prometheus_data:
+  grafana_data:

@@ -80,19 +80,23 @@ impl RaftNode {
             };
         }
 
+        // Report only the last index covered by this request,
+        // not the follower's entire local log length.
+        let match_index = prev_log_index + entries.entries.len();
+
         let mut index = prev_log_index + 1;
 
         for incoming_entry in entries.entries {
             if index < self.log.len() {
-                // Existing entry conflicts with leader's entry.
+                // Existing entry conflicts with the leader's entry.
                 if self.log[index].term != incoming_entry.term {
                     self.log.truncate(index);
                     self.log.push(incoming_entry);
                 }
 
-                // Same term means the entry already exists.
+                // Same term: the entry already exists.
             } else {
-                // Follower's log is shorter.
+                // The follower's log is shorter.
                 self.log.push(incoming_entry);
             }
 
@@ -108,7 +112,7 @@ impl RaftNode {
             term: self.current_term,
             follower_id: self.id,
             success: true,
-            match_index: self.log.len() - 1,
+            match_index,
         }
     }
 
@@ -224,7 +228,10 @@ impl RaftNode {
 
             if let Some(responder) = self.pending_requests.remove(&(index, term)) {
                 let (success, message) = match result {
-                    Ok(()) => (true, format!("Write committed and applied at log index {index}")),
+                    Ok(()) => (
+                        true,
+                        format!("Write committed and applied at log index {index}"),
+                    ),
                     Err(err) => (
                         false,
                         format!("Log entry committed, but database application failed: {err}"),

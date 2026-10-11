@@ -3,12 +3,6 @@
 # Distributed Key-Value Store & Consensus Engine
 
 **A high-performance, fault-tolerant distributed key-value database built from scratch in Rust.**
-
-[![Rust](https://img.shields.io/badge/Language-Rust_1.75%2B-orange.svg)](https://www.rust-lang.org/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Raft Consensus](https://img.shields.io/badge/Consensus-Raft-purple.svg)](https://raft.github.io/)
-[![Storage](https://img.shields.io/badge/Storage-LSM%20Tree-brightgreen.svg)](https://en.wikipedia.org/wiki/Log-structured_merge-tree)
-
 ---
 
 ![Project Banner](./docs/images/banner.svg)

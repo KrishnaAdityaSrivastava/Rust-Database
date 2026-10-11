@@ -117,10 +117,7 @@ impl RaftNode {
         }
 
         if request.term > self.current_term {
-            self.current_term = request.term;
-            self.role = Role::Follower;
-            self.voted_for = None;
-            self.leader_id = None;
+            self.step_down(request.term, now);
         }
 
         let can_vote = match self.voted_for {

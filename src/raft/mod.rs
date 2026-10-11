@@ -15,8 +15,11 @@ pub use network::Network;
 pub use node::{LogEntry, NodeId, RaftNode, Role};
 pub use request::{Responder, StoreOperation, StoreRequest};
 
+pub use crate::runtime::fault::{
+    ChaosConfig, DeterministicRng, Fault, InvariantViolation, LinkFaultPolicy, ScheduledFault,
+};
 pub use crate::runtime::runtime::{Clock, Runtime, Transport};
-pub use crate::runtime::simulator::{Event, Simulation};
+pub use crate::runtime::simulator::{Event, SimulatedTransport, Simulation};
 
 static LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 

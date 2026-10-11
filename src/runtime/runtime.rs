@@ -28,6 +28,10 @@ impl Clock {
     pub fn advance(&mut self, millis: u64) {
         self.now += Duration::from_millis(millis);
     }
+
+    pub fn advance_duration(&mut self, duration: Duration) {
+        self.now += duration;
+    }
 }
 
 pub trait Transport: Send + Sync {

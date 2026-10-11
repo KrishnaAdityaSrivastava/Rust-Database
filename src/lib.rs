@@ -9,4 +9,7 @@ pub use database::{Config, Config as DatabaseConfig, Config as DbConfig, Databas
 pub use lsm::sstable::SSTable;
 pub use lsm::wal::log_record::Command;
 pub use lsm::wal::Logger;
-pub use raft::{Clock, Event, Message, Network, NodeId, RaftNode, Role, Simulation};
+pub use raft::{
+    ChaosConfig, Clock, DeterministicRng, Event, Fault, InvariantViolation, LinkFaultPolicy,
+    Message, Network, NodeId, RaftNode, Role, ScheduledFault, SimulatedTransport, Simulation,
+};

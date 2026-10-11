@@ -14,7 +14,7 @@ use crate::{
 use super::message::Message;
 use super::request::{Responder, StoreOperation, StoreRequest};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId {
     pub id: u64,
 }
@@ -284,5 +284,16 @@ impl RaftNode {
                 &mut self.outbox,
             );
         }
+    }
+
+    pub fn restart(&mut self, now: Instant) {
+        self.role = Role::Follower;
+        self.leader_id = None;
+        self.votes_received.clear();
+        self.outbox.clear();
+        self.next_index.clear();
+        self.match_index.clear();
+        self.pending_requests.clear();
+        self.reset_election_timeout(now);
     }
 }

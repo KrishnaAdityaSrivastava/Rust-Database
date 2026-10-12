@@ -1,14 +1,12 @@
 use std::io::{self, Read, Write};
 
-use crate::wal::{
-    log_record::{Value, DataType},
-};
+use crate::wal::log_record::{DataType, Value};
 
 pub const MAGIC: &[u8; 4] = b"SST1";
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
-// 4 magic + 1 version + 8 index_offset + 8 index_len + 8 entry_count
-pub const HEADER_SIZE: u64 = 29;
+// 4 magic + 1 version + 8 * 5 metadata fields
+pub const HEADER_SIZE: u64 = 45;
 
 #[derive(Debug)]
 pub enum Entry {
@@ -21,6 +19,8 @@ pub struct Header {
     pub index_offset: u64,
     pub index_len: u64,
     pub entry_count: u64,
+    pub bloom_offset: u64,
+    pub bloom_len: u64,
 }
 
 pub fn write_header<W: Write>(writer: &mut W, header: &Header) -> io::Result<()> {
@@ -29,6 +29,8 @@ pub fn write_header<W: Write>(writer: &mut W, header: &Header) -> io::Result<()>
     writer.write_all(&header.index_offset.to_le_bytes())?;
     writer.write_all(&header.index_len.to_le_bytes())?;
     writer.write_all(&header.entry_count.to_le_bytes())?;
+    writer.write_all(&header.bloom_offset.to_le_bytes())?;
+    writer.write_all(&header.bloom_len.to_le_bytes())?;
 
     Ok(())
 }
@@ -65,10 +67,18 @@ pub fn read_header<R: Read>(reader: &mut R) -> io::Result<Header> {
     reader.read_exact(&mut buffer)?;
     let entry_count = u64::from_le_bytes(buffer);
 
+    reader.read_exact(&mut buffer)?;
+    let bloom_offset = u64::from_le_bytes(buffer);
+
+    reader.read_exact(&mut buffer)?;
+    let bloom_len = u64::from_le_bytes(buffer);
+
     Ok(Header {
         index_offset,
         index_len,
         entry_count,
+        bloom_offset,
+        bloom_len
     })
 }
 
@@ -105,7 +115,6 @@ pub fn write_record<W: Write>(writer: &mut W, key: &str, entry: &Entry) -> io::R
     writer.write_all(&header)?;
     writer.write_all(key_bytes)?;
     writer.write_all(&value_bytes)?;
-
 
     Ok(record_len)
 }

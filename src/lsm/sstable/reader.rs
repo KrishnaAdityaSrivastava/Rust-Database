@@ -115,3 +115,41 @@ fn validate_header(file: &File, header: &super::format::Header) -> io::Result<()
 
     Ok(())
 }
+
+pub fn load_bloom_filter(path: &std::path::Path) -> io::Result<super::bloom::BloomFilter> {
+    use std::io::{Error, ErrorKind, Read, Seek, SeekFrom};
+
+    let mut file = File::open(path)?;
+    let header = super::format::read_header(&mut file)?;
+
+    if header.bloom_len == 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "SSTable does not contain a persisted Bloom filter",
+        ));
+    }
+
+    let bloom_len = usize::try_from(header.bloom_len).map_err(|_| {
+        Error::new(ErrorKind::InvalidData, "Bloom filter length is too large")
+    })?;
+
+    let file_len = file.metadata()?.len();
+    let bloom_end = header
+        .bloom_offset
+        .checked_add(header.bloom_len)
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "Bloom filter offset overflow"))?;
+
+    if header.bloom_offset < super::format::HEADER_SIZE as u64 || bloom_end > file_len {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Bloom filter points outside the SSTable",
+        ));
+    }
+
+    file.seek(SeekFrom::Start(header.bloom_offset))?;
+
+    let mut bytes = vec![0u8; bloom_len];
+    file.read_exact(&mut bytes)?;
+
+    super::bloom::BloomFilter::from_bytes(&bytes)
+}

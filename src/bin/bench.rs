@@ -103,7 +103,7 @@ fn main() {
     println!("\n[1/2] Running Standalone LSM Storage Engine Benchmarks...");
     let standalone_dir = tempdir().expect("Failed to create tempdir");
     let standalone_db =
-        Database::open_in_dir(standalone_dir.path(), Config::new(3, 200, 4)).expect("Failed DB open");
+        Database::open_in_dir(standalone_dir.path(), Config::new(3, 10_000, 10_000)).expect("Failed DB open");
     let num_ops = 10_000;
 
     // 1a. Sequential Inserts

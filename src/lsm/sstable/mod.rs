@@ -63,7 +63,7 @@ impl SSTable {
     pub fn write_entries(&mut self, entries: &[(&String, &Entry)]) -> io::Result<()> {
         self.index = writer::write(&self.file_name, entries)?;
         self.bloom_filter = reader::load_bloom_filter(&self.file_name)?;
-
+        
         Ok(())
     }
 

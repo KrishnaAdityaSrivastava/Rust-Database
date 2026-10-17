@@ -52,7 +52,10 @@ pub fn read_header<R: Read>(reader: &mut R) -> io::Result<Header> {
     if version[0] != VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "unsupported SSTable version",
+            format!(
+                "unsupported SSTable version: expected {VERSION}, found {}",
+                version[0]
+            ),
         ));
     }
 
@@ -78,7 +81,7 @@ pub fn read_header<R: Read>(reader: &mut R) -> io::Result<Header> {
         index_len,
         entry_count,
         bloom_offset,
-        bloom_len
+        bloom_len,
     })
 }
 

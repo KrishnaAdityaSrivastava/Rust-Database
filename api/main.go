@@ -15,6 +15,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"sync"
+	"sort"
 )
 
 const (
@@ -68,6 +70,17 @@ type WireResponse struct {
 	Message  string          `json:"message"`
 	LeaderID *uint64         `json:"leader_id"`
 	Term     uint64          `json:"term"`
+}
+type NodeHealth struct {
+	NodeID    uint64 `json:"node_id"`
+	Address   string `json:"address"`
+	Reachable bool   `json:"reachable"`
+	Healthy   bool   `json:"healthy"`
+	LatencyMS int64  `json:"latency_ms"`
+	Message   string `json:"message,omitempty"`
+	Error     string `json:"error,omitempty"`
+	LeaderID  *uint64 `json:"leader_id,omitempty"`
+	Term      uint64 `json:"term,omitempty"`
 }
 
 func validateValue(v WireValue) error {
@@ -175,6 +188,8 @@ func metricsMiddleware(next http.Handler) http.Handler {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/kv/"):
 			route = "/kv/{key}"
+		case r.URL.Path == "/health/nodes":
+    		route = "/health/nodes"
 		case r.URL.Path == "/status":
 			route = "/status"
 		case r.URL.Path == "/metrics":
@@ -348,11 +363,98 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	forwardRust(w, r, WireRequest{Op: "STATUS"})
 }
 
+func handleNodeHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Sort IDs so the response is deterministic.
+	ids := make([]uint64, 0, len(rustNodes))
+	for id := range rustNodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool {
+		return ids[i] < ids[j]
+	})
+
+	results := make([]NodeHealth, len(ids))
+	var wg sync.WaitGroup
+
+	for i, id := range ids {
+		wg.Add(1)
+
+		go func(i int, id uint64) {
+			defer wg.Done()
+
+			addr := rustNodes[id]
+			result := NodeHealth{
+				NodeID:  id,
+				Address: addr,
+			}
+
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(
+				r.Context(),
+				2*time.Second,
+			)
+			defer cancel()
+
+			resp, err := callRust(ctx, addr, WireRequest{
+				Op: "STATUS",
+			})
+
+			result.LatencyMS = time.Since(start).Milliseconds()
+
+			if err != nil {
+				result.Reachable = false
+				result.Healthy = false
+				result.Error = err.Error()
+				result.Message = "Node did not respond to STATUS"
+				results[i] = result
+				return
+			}
+
+			result.Reachable = true
+			result.Healthy = resp.Success
+			result.Message = resp.Message
+			result.LeaderID = resp.LeaderID
+			result.Term = resp.Term
+
+			results[i] = result
+		}(i, id)
+	}
+
+	wg.Wait()
+
+	allHealthy := true
+	healthyCount := 0
+
+	for _, node := range results {
+		if node.Healthy {
+			healthyCount++
+		} else {
+			allHealthy = false
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":       allHealthy,
+		"cluster_size":  len(results),
+		"healthy_nodes": healthyCount,
+		"message":      fmt.Sprintf("%d/%d nodes responding healthily", healthyCount, len(results)),
+		"nodes":         results,
+	})
+}
+
+
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/kv/", handleKV)
 	mux.HandleFunc("/status", handleStatus)
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/health/nodes", handleNodeHealth)
 
 	server := &http.Server{
 		Addr:              httpAddr,

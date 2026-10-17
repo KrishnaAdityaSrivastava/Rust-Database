@@ -10,12 +10,15 @@ services:
       - "3:node3:6003"
       - "--api-addr"
       - "0.0.0.0:7001"
+      - "--grpc-addr"
+      - "0.0.0.0:8001"
       - "--log"
       - "--dir"
       - "/data"
     ports:
       - "6001:6001"
       - "7001:7001"
+      - "8001:8001"
     volumes:
       - node1_data:/data
     networks:
@@ -32,12 +35,15 @@ services:
       - "3:node3:6003"
       - "--api-addr"
       - "0.0.0.0:7002"
+      - "--grpc-addr"
+      - "0.0.0.0:8002"
       - "--log"
       - "--dir"
       - "/data"
     ports:
       - "6002:6002"
       - "7002:7002"
+      - "8002:8002"
     volumes:
       - node2_data:/data
     networks:
@@ -54,40 +60,19 @@ services:
       - "2:node2:6002"
       - "--api-addr"
       - "0.0.0.0:7003"
+      - "--grpc-addr"
+      - "0.0.0.0:8003"
       - "--log"
       - "--dir"
       - "/data"
     ports:
       - "6003:6003"
       - "7003:7003"
+      - "8003:8003"
     volumes:
       - node3_data:/data
     networks:
       - kvnet
-
-  prometheus:
-    image: prom/prometheus
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-    networks:
-      - kvnet
-
-  grafana:
-    image: grafana/grafana
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    networks:
-      - kvnet
-    depends_on:
-      - prometheus
 
   api:
     build:
@@ -102,8 +87,56 @@ services:
     networks:
       - kvnet
 
+  mcp:
+    build:
+      context: ./kvraft-copilot
+      dockerfile: Dockerfile
+    environment:
+      HOST: 0.0.0.0
+      PORT: "3000"
+      KVRAFT_GATEWAY_URL: http://api:8080
+      NODE_ENV: production
+    ports:
+      - "3001:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks:
+      - kvnet
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    restart: unless-stopped
+    networks:
+      - kvnet
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - kvnet
+
 networks:
   kvnet:
+    driver: bridge
 
 volumes:
   node1_data:

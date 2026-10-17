@@ -1,26 +1,59 @@
+
 #!/bin/bash
+set -e
 
-mkdir -p ./data/node1 ./data/node2 ./data/node3
+# Usage: ./run.sh <servers> <clients>
+if [[ $# -ne 2 || ! "$1" =~ ^[1-9][0-9]*$ || ! "$2" =~ ^[0-9]+$ ]]; then
+    echo "Usage: $0 <number_of_servers> <number_of_clients>"
+    echo "Example: $0 5 3"
+    exit 1
+fi
 
+SERVERS=$1
+CLIENTS=$2
+
+# Base ports
+RAFT_PORT=6001
+API_PORT=7001
+GRPC_PORT=8001
+
+mkdir -p ./data
+
+echo "Building binaries..."
 cargo build --bins
 
-# xfce4-terminal --title="Raft Node 1" \
-#   --command="bash -c 'cargo run --bin node -- 1 127.0.0.1:6001 --log --dir ./data/node1; exec bash'" &
+# Start Raft servers
+for ((i = 1; i <= SERVERS; i++)); do
+    raft_port=$((RAFT_PORT + i - 1))
+    api_port=$((API_PORT + i - 1))
+    grpc_port=$((GRPC_PORT + i - 1))
+    data_dir="./data/node$i"
 
+    mkdir -p "$data_dir"
 
-xfce4-terminal --title="Raft Node 1" \
-  --command="bash -c 'cargo run --bin node -- 1 127.0.0.1:6001 2:127.0.0.1:6002 3:127.0.0.1:6003 --api-addr 127.0.0.1:7001 --grpc-addr 127.0.0.1:8001 --log --dir ./data/node1; exec bash'" &
+    # Generate peer arguments for every other server
+    peers=""
+    for ((j = 1; j <= SERVERS; j++)); do
+        if ((j != i)); then
+            peer_port=$((RAFT_PORT + j - 1))
+            peers+=" $j:127.0.0.1:$peer_port"
+        fi
+    done
 
-xfce4-terminal --title="Raft Node 2" \
-  --command="bash -c 'cargo run --bin node -- 2 127.0.0.1:6002 1:127.0.0.1:6001 3:127.0.0.1:6003 --api-addr 127.0.0.1:7002 --grpc-addr 127.0.0.1:8002 --log --dir ./data/node2; exec bash'" &
+    echo "Starting Raft Node $i..."
 
-xfce4-terminal --title="Raft Node 3" \
-  --command="bash -c 'cargo run --bin node -- 3 127.0.0.1:6003 1:127.0.0.1:6001 2:127.0.0.1:6002 --api-addr 127.0.0.1:7003 --grpc-addr 127.0.0.1:8003 --log --dir ./data/node3; exec bash'" &
+    xfce4-terminal \
+        --title="Raft Node $i" \
+        --command="bash -c 'cargo run --bin node -- $i 127.0.0.1:$raft_port$peers --api-addr 127.0.0.1:$api_port --grpc-addr 127.0.0.1:$grpc_port --log --dir $data_dir; exec bash'" &
+done
 
-# sleep 2
+# Start clients
+for ((i = 1; i <= CLIENTS; i++)); do
+    echo "Starting Raft Client $i..."
 
-xfce4-terminal --title="Raft Client 1" \
-  --command="bash -c 'cargo run --bin client -- 127.0.0.1:6001; exec bash'" &
+    xfce4-terminal \
+        --title="Raft Client $i" \
+        --command="bash -c 'cargo run --bin client -- 127.0.0.1:$RAFT_PORT; exec bash'" &
+done
 
-# xfce4-terminal --title="Raft Client 2" \
-#   --command="bash -c 'cargo run --bin client -- 127.0.0.1:6001; exec bash'" &
+echo "Started $SERVERS server(s) and $CLIENTS client(s)."

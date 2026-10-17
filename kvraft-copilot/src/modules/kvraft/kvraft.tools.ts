@@ -140,7 +140,7 @@ export class KVRaftTools {
         if (!/^-?\d+$/.test(input.value)) { throw new Error('For type "int", value must be an integer string.'); }
         const parsed = BigInt(input.value);
         if (parsed < -(2n ** 63n) || parsed > 2n ** 63n - 1n) { throw new Error('Integer is outside the signed 64-bit range.'); }
-        wireValue = { type: 'int', value: input.value };
+        wireValue = { type: 'int', value: Number(input.value) };
         break;
       }
       case 'float': {
@@ -204,9 +204,97 @@ export class KVRaftTools {
     inputSchema: z.object({}),
   })
   async getClusterMetrics(_input: any, ctx: ExecutionContext) {
-    const result = await this.request('/metrics');
+    // /metrics returns Prometheus text exposition format, not JSON.
+    // Fetch it directly and parse it into a structured object.
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/metrics`, { signal: AbortSignal.timeout(6000) });
+    } catch (error) {
+      throw new Error(`Cannot reach KVRaft gateway at ${this.baseUrl}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!response.ok) {
+      throw new Error(`KVRaft gateway returned HTTP ${response.status} for /metrics`);
+    }
+    const text = await response.text();
+
+    // Parse Prometheus text exposition format into structured JSON.
+    type Sample = { labels: Record<string, string>; value: number };
+    type MetricEntry = { help: string; type: string; samples: Sample[] };
+    const metrics: Record<string, MetricEntry> = {};
+    let currentName = '';
+
+    for (const rawLine of text.split('\n')) {
+      const line = rawLine.trim();
+      if (!line) continue;
+
+      if (line.startsWith('# HELP ')) {
+        const rest = line.slice('# HELP '.length);
+        const spaceIdx = rest.indexOf(' ');
+        if (spaceIdx === -1) continue;
+        const name = rest.slice(0, spaceIdx);
+        const help = rest.slice(spaceIdx + 1);
+        if (!metrics[name]) metrics[name] = { help: '', type: '', samples: [] };
+        metrics[name].help = help;
+        currentName = name;
+        continue;
+      }
+
+      if (line.startsWith('# TYPE ')) {
+        const rest = line.slice('# TYPE '.length);
+        const parts = rest.split(' ');
+        if (parts.length < 2) continue;
+        const name = parts[0];
+        const type = parts[1];
+        if (!metrics[name]) metrics[name] = { help: '', type: '', samples: [] };
+        metrics[name].type = type;
+        currentName = name;
+        continue;
+      }
+
+      if (line.startsWith('#')) continue;
+
+      // Sample line: metric_name[{labels}] value [timestamp]
+      const braceOpen = line.indexOf('{');
+      const braceClose = line.indexOf('}');
+      let metricName: string;
+      let labelsStr: string;
+      let rest: string;
+
+      if (braceOpen !== -1 && braceClose !== -1) {
+        metricName = line.slice(0, braceOpen);
+        labelsStr = line.slice(braceOpen + 1, braceClose);
+        rest = line.slice(braceClose + 1).trim();
+      } else {
+        const spaceIdx = line.indexOf(' ');
+        if (spaceIdx === -1) continue;
+        metricName = line.slice(0, spaceIdx);
+        labelsStr = '';
+        rest = line.slice(spaceIdx + 1).trim();
+      }
+
+      const valuePart = rest.split(' ')[0];
+      const value = parseFloat(valuePart);
+      if (Number.isNaN(value)) continue;
+
+      const labels: Record<string, string> = {};
+      if (labelsStr) {
+        for (const pair of labelsStr.split(',')) {
+          const eqIdx = pair.indexOf('=');
+          if (eqIdx === -1) continue;
+          const k = pair.slice(0, eqIdx).trim();
+          const v = pair.slice(eqIdx + 1).trim().replace(/^"|"$/g, '');
+          labels[k] = v;
+        }
+      }
+
+      const name = metricName || currentName;
+      if (!name) continue;
+      if (!metrics[name]) metrics[name] = { help: '', type: '', samples: [] };
+      metrics[name].samples.push({ labels, value });
+    }
+
     ctx.logger.info('Retrieved cluster metrics');
-    return result;
+    return { gateway: this.baseUrl, metrics };
   }
 
   @Tool({

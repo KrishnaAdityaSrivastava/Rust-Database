@@ -8,9 +8,14 @@
 
 ```mermaid
 flowchart TD
-    A[AI Agent (MCP client)] --> B[KVRaft Copilot – NitroStack MCP server]
-    B -->|HTTP fetch (6 s timeout)| C[Go REST Gateway (⟨KVRAFT_GATEWAY_URL⟩)]
-    C -->|gRPC / Raft| D[KVRaft Cluster (node1:7001, node2:7002, node3:7003)]
+    A["AI Agent - MCP Client"] --> B["KVRaft Copilot - NitroStack MCP Server"]
+    B -->|"HTTP fetch - 6s timeout"| C["Go REST Gateway"]
+    C -->|"gRPC and Raft"| D["KVRaft Cluster - 3 Nodes"]
+
+    D --- E["Node 1 - Port 7001"]
+    D --- F["Node 2 - Port 7002"]
+    D --- G["Node 3 - Port 7003"]
+
 ```
 
 The Copilot connects to the **Go REST gateway** (`KVRAFT_GATEWAY_URL`) and offers a suite of tightly‑typed tools that give AI agents first‑class access to the cluster.

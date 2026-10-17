@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"sync"
@@ -189,11 +190,19 @@ func metricsMiddleware(next http.Handler) http.Handler {
 		case strings.HasPrefix(r.URL.Path, "/kv/"):
 			route = "/kv/{key}"
 		case r.URL.Path == "/health/nodes":
-    		route = "/health/nodes"
+			route = "/health/nodes"
+		case strings.HasPrefix(r.URL.Path, "/health/node/"):
+			route = "/health/node/{id}"
 		case r.URL.Path == "/status":
 			route = "/status"
 		case r.URL.Path == "/metrics":
 			route = "/metrics"
+		case strings.HasPrefix(r.URL.Path, "/errors/recent"):
+			route = "/errors/recent"
+		case r.URL.Path == "/diagnose":
+			route = "/diagnose"
+		case r.URL.Path == "/recovery/recommend":
+			route = "/recovery/recommend"
 		}
 
 		apiRequests.WithLabelValues(
@@ -449,12 +458,345 @@ func handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 
+// handleNodeDetail serves GET /health/node/{id}.
+// It contacts that specific node directly and returns its health.
+func handleNodeDetail(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	idStr := strings.TrimPrefix(r.URL.Path, "/health/node/")
+	if idStr == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing node_id"})
+		return
+	}
+	id64, err := strconv.ParseUint(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "node_id must be a positive integer"})
+		return
+	}
+
+	addr, ok := rustNodes[id64]
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": fmt.Sprintf("unknown node_id %d; configured nodes: %v", id64, rustNodes),
+		})
+		return
+	}
+
+	result := NodeHealth{
+		NodeID:  id64,
+		Address: addr,
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	resp, err := callRust(ctx, addr, WireRequest{Op: "STATUS"})
+	result.LatencyMS = time.Since(start).Milliseconds()
+
+	if err != nil {
+		result.Reachable = false
+		result.Healthy = false
+		result.Error = err.Error()
+		result.Message = "Node did not respond to STATUS"
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+
+	result.Reachable = true
+	result.Healthy = resp.Success
+	result.Message = resp.Message
+	result.LeaderID = resp.LeaderID
+	result.Term = resp.Term
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleRecentErrors serves GET /errors/recent[?limit=N].
+// It queries every node in parallel and collects those that are
+// unhealthy or unreachable, returning them as a structured error list.
+func handleRecentErrors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	limit := 0
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		l, err := strconv.Atoi(lStr)
+		if err != nil || l < 1 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be a positive integer"})
+			return
+		}
+		limit = l
+	}
+
+	ids := make([]uint64, 0, len(rustNodes))
+	for id := range rustNodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	type nodeError struct {
+		NodeID    uint64 `json:"node_id"`
+		Address   string `json:"address"`
+		Reachable bool   `json:"reachable"`
+		Healthy   bool   `json:"healthy"`
+		Error     string `json:"error,omitempty"`
+		Message   string `json:"message,omitempty"`
+		LatencyMS int64  `json:"latency_ms"`
+	}
+
+	results := make([]nodeError, len(ids))
+	var wg sync.WaitGroup
+
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id uint64) {
+			defer wg.Done()
+			addr := rustNodes[id]
+			ne := nodeError{NodeID: id, Address: addr}
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			resp, err := callRust(ctx, addr, WireRequest{Op: "STATUS"})
+			ne.LatencyMS = time.Since(start).Milliseconds()
+			if err != nil {
+				ne.Reachable = false
+				ne.Healthy = false
+				ne.Error = err.Error()
+				ne.Message = "Node did not respond to STATUS"
+			} else {
+				ne.Reachable = true
+				ne.Healthy = resp.Success
+				ne.Message = resp.Message
+				if !resp.Success {
+					ne.Error = resp.Message
+				}
+			}
+			results[i] = ne
+		}(i, id)
+	}
+	wg.Wait()
+
+	// Collect only unhealthy / unreachable nodes as "errors".
+	var errs []nodeError
+	for _, ne := range results {
+		if !ne.Healthy {
+			errs = append(errs, ne)
+		}
+	}
+	if limit > 0 && len(errs) > limit {
+		errs = errs[:limit]
+	}
+	if errs == nil {
+		errs = []nodeError{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true,
+		"message": fmt.Sprintf("%d error(s) found across %d node(s)", len(errs), len(ids)),
+		"errors":  errs,
+	})
+}
+
+// handleDiagnose serves GET /diagnose.
+// It aggregates the cluster status and per-node health into a single
+// structured diagnostic report.
+func handleDiagnose(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ids := make([]uint64, 0, len(rustNodes))
+	for id := range rustNodes {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	nodes := make([]NodeHealth, len(ids))
+	var wg sync.WaitGroup
+
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, id uint64) {
+			defer wg.Done()
+			addr := rustNodes[id]
+			nh := NodeHealth{NodeID: id, Address: addr}
+			start := time.Now()
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			resp, err := callRust(ctx, addr, WireRequest{Op: "STATUS"})
+			nh.LatencyMS = time.Since(start).Milliseconds()
+			if err != nil {
+				nh.Reachable = false
+				nh.Healthy = false
+				nh.Error = err.Error()
+				nh.Message = "Node did not respond"
+			} else {
+				nh.Reachable = true
+				nh.Healthy = resp.Success
+				nh.Message = resp.Message
+				nh.LeaderID = resp.LeaderID
+				nh.Term = resp.Term
+			}
+			nodes[i] = nh
+		}(i, id)
+	}
+	wg.Wait()
+
+	healthyCount := 0
+	reachableCount := 0
+	var leaderID *uint64
+	var term uint64
+	var issues []string
+
+	for _, n := range nodes {
+		if n.Reachable {
+			reachableCount++
+		} else {
+			issues = append(issues, fmt.Sprintf("node %d (%s) is unreachable: %s", n.NodeID, n.Address, n.Error))
+		}
+		if n.Healthy {
+			healthyCount++
+			if n.LeaderID != nil {
+				leaderID = n.LeaderID
+			}
+			if n.Term > term {
+				term = n.Term
+			}
+		} else if n.Reachable {
+			issues = append(issues, fmt.Sprintf("node %d (%s) is reachable but unhealthy: %s", n.NodeID, n.Address, n.Message))
+		}
+	}
+
+	clusterOK := healthyCount > len(ids)/2
+	summary := fmt.Sprintf("%d/%d nodes healthy, %d/%d reachable", healthyCount, len(ids), reachableCount, len(ids))
+	if !clusterOK {
+		summary = "DEGRADED: " + summary + " — quorum may be lost"
+	}
+	if issues == nil {
+		issues = []string{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":         clusterOK,
+		"message":         summary,
+		"cluster_size":    len(ids),
+		"healthy_nodes":   healthyCount,
+		"reachable_nodes": reachableCount,
+		"leader_id":       leaderID,
+		"term":            term,
+		"nodes":           nodes,
+		"issues":          issues,
+	})
+}
+
+// handleRecoveryRecommend serves POST /recovery/recommend.
+// It accepts a { "summary": "..." } body and applies rule-based
+// heuristics to return structured recovery suggestions.
+func handleRecoveryRecommend(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	defer r.Body.Close()
+
+	var body struct {
+		Summary string `json:"summary"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "expected JSON with a \"summary\" field"})
+		return
+	}
+	if strings.TrimSpace(body.Summary) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "summary must not be empty"})
+		return
+	}
+
+	summaryLower := strings.ToLower(body.Summary)
+
+	type step struct {
+		Order       int    `json:"order"`
+		Action      string `json:"action"`
+		Description string `json:"description"`
+		Risk        string `json:"risk"`
+	}
+
+	var steps []step
+	var diagnosis string
+
+	switch {
+	case strings.Contains(summaryLower, "leader") && (strings.Contains(summaryLower, "lost") || strings.Contains(summaryLower, "no leader") || strings.Contains(summaryLower, "election")):
+		diagnosis = "Leader loss / election failure"
+		steps = []step{
+			{1, "diagnose_nodes", "Run diagnose_nodes to confirm which nodes are reachable and identify the current election state.", "none"},
+			{2, "wait_election", "Allow up to 10 seconds for a new leader election to complete before intervening.", "low"},
+			{3, "restart_isolated_node", "If a node is isolated (reachable = false), restart that node container to re-join the cluster.", "medium — causes brief unavailability on that node"},
+			{4, "verify_quorum", "Re-run diagnose_nodes and confirm healthy_nodes > cluster_size / 2.", "none"},
+		}
+	case strings.Contains(summaryLower, "quorum") || strings.Contains(summaryLower, "majority") || strings.Contains(summaryLower, "unavailable"):
+		diagnosis = "Quorum loss / majority of nodes down"
+		steps = []step{
+			{1, "diagnose_nodes", "Identify which nodes are down.", "none"},
+			{2, "restore_nodes", "Bring enough downed nodes back online to restore quorum (need > N/2 healthy).", "medium"},
+			{3, "verify_leader", "Confirm a new leader is elected via get_cluster_status.", "none"},
+			{4, "replay_pending_ops", "If writes were rejected during the outage, retry them after quorum is restored.", "low — idempotent ops are safe to retry"},
+		}
+	case strings.Contains(summaryLower, "network") || strings.Contains(summaryLower, "partition") || strings.Contains(summaryLower, "split"):
+		diagnosis = "Network partition"
+		steps = []step{
+			{1, "identify_partition", "Use diagnose_nodes to find which nodes can reach each other.", "none"},
+			{2, "restore_connectivity", "Restore network connectivity between partitioned segments.", "none"},
+			{3, "wait_convergence", "Allow Raft to re-synchronise logs; monitor term and leader_id stabilising.", "low"},
+			{4, "check_stale_reads", "Clients that read from a minority partition may have stale data — re-read critical keys.", "low"},
+		}
+	case strings.Contains(summaryLower, "slow") || strings.Contains(summaryLower, "latency") || strings.Contains(summaryLower, "timeout"):
+		diagnosis = "High latency / timeouts"
+		steps = []step{
+			{1, "check_metrics", "Run get_cluster_metrics to inspect request latency percentiles and error rates.", "none"},
+			{2, "diagnose_nodes", "Check per-node latency via diagnose_nodes.", "none"},
+			{3, "investigate_load", "Examine host CPU/memory/disk I/O on slow nodes.", "none"},
+			{4, "reduce_traffic", "Temporarily reduce write throughput to allow Raft log catchup if a follower is lagging.", "medium — impacts write availability"},
+		}
+	default:
+		diagnosis = "General cluster issue"
+		steps = []step{
+			{1, "diagnose_nodes", "Start with a full node health check to gather evidence.", "none"},
+			{2, "get_recent_errors", "Retrieve recent node errors for more detail.", "none"},
+			{3, "get_cluster_status", "Confirm current leader and term.", "none"},
+			{4, "escalate", "If the above tools do not pinpoint the issue, review node logs directly.", "none"},
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":         true,
+		"failure_summary": body.Summary,
+		"diagnosis":       diagnosis,
+		"recovery_steps":  steps,
+		"disclaimer":      "These are heuristic recommendations. Always validate against your specific cluster state before acting.",
+	})
+}
+
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/kv/", handleKV)
 	mux.HandleFunc("/status", handleStatus)
 	mux.Handle("/metrics", promhttp.Handler())
 	mux.HandleFunc("/health/nodes", handleNodeHealth)
+	mux.HandleFunc("/health/node/", handleNodeDetail)
+	mux.HandleFunc("/errors/recent", handleRecentErrors)
+	mux.HandleFunc("/diagnose", handleDiagnose)
+	mux.HandleFunc("/recovery/recommend", handleRecoveryRecommend)
 
 	server := &http.Server{
 		Addr:              httpAddr,

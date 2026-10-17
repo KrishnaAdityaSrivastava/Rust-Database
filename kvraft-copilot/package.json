@@ -8,7 +8,7 @@
     "dev": "nitrostack-cli dev",
     "build": "nitrostack-cli build",
     "start": "npm run build && nitrostack-cli start",
-    "start:prod": "cd kvraft-copilot && npm run start:prod",
+    "start:prod": "nitrostack-cli start",
     "upgrade": "nitrostack-cli upgrade",
     "install:all": "nitrostack-cli install",
     "widget": "npm --prefix src/widgets"

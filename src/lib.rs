@@ -14,3 +14,9 @@ pub use raft::{
     ChaosConfig, Clock, DeterministicRng, Event, Fault, InvariantViolation, LinkFaultPolicy,
     Message, Network, NodeId, RaftNode, Role, ScheduledFault, SimulatedTransport, Simulation,
 };
+
+pub mod kvraft {
+    pub mod v1 {
+        tonic::include_proto!("kvraft.v1");
+    }
+}

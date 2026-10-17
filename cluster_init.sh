@@ -9,13 +9,13 @@ cargo build --bins
 
 
 xfce4-terminal --title="Raft Node 1" \
-  --command="bash -c 'cargo run --bin node -- 1 127.0.0.1:6001 2:127.0.0.1:6002 3:127.0.0.1:6003 --api-addr 127.0.0.1:7001 --log --dir ./data/node1; exec bash'" &
+  --command="bash -c 'cargo run --bin node -- 1 127.0.0.1:6001 2:127.0.0.1:6002 3:127.0.0.1:6003 --api-addr 127.0.0.1:7001 --grpc-addr 127.0.0.1:8001 --log --dir ./data/node1; exec bash'" &
 
 xfce4-terminal --title="Raft Node 2" \
-  --command="bash -c 'cargo run --bin node -- 2 127.0.0.1:6002 1:127.0.0.1:6001 3:127.0.0.1:6003 --api-addr 127.0.0.1:7002 --log --dir ./data/node2; exec bash'" &
+  --command="bash -c 'cargo run --bin node -- 2 127.0.0.1:6002 1:127.0.0.1:6001 3:127.0.0.1:6003 --api-addr 127.0.0.1:7002 --grpc-addr 127.0.0.1:8002 --log --dir ./data/node2; exec bash'" &
 
 xfce4-terminal --title="Raft Node 3" \
-  --command="bash -c 'cargo run --bin node -- 3 127.0.0.1:6003 1:127.0.0.1:6001 2:127.0.0.1:6002 --api-addr 127.0.0.1:7003 --log --dir ./data/node3; exec bash'" &
+  --command="bash -c 'cargo run --bin node -- 3 127.0.0.1:6003 1:127.0.0.1:6001 2:127.0.0.1:6002 --api-addr 127.0.0.1:7003 --grpc-addr 127.0.0.1:8003 --log --dir ./data/node3; exec bash'" &
 
 # sleep 2
 

@@ -51,10 +51,16 @@ impl Network {
 
     pub async fn start(self, node: RaftNode) -> UnboundedSender<Message> {
         let api_addr = "127.0.0.1:0".to_string();
-        self.start_with_api(node, api_addr).await
+        let grpc_addr = "127.0.0.1:0".to_string();
+        self.start_with_api(node, api_addr, grpc_addr).await
     }
 
-    pub async fn start_with_api(self, node: RaftNode, api_addr: String) -> UnboundedSender<Message> {
+    pub async fn start_with_api(
+        self,
+        node: RaftNode,
+        api_addr: String,
+        grpc_addr: String,
+    ) -> UnboundedSender<Message> {
         let local_id = self.local_id;
 
         let (node_tx, node_rx) = mpsc::unbounded_channel::<Message>();
@@ -63,9 +69,7 @@ impl Network {
         let listener_tx = service_tx.clone();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                crate::runtime::service::run_listener(api_addr, listener_tx).await
-            {
+            if let Err(e) = crate::runtime::service::run_listener(api_addr, listener_tx).await {
                 if super::is_log_enabled() {
                     eprintln!("[API] Listener stopped: {e}");
                 }
@@ -155,6 +159,16 @@ impl Network {
                 }
 
                 tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        });
+
+        let grpc_tx = service_tx.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) =
+                crate::runtime::grpc_service::run_grpc_listener(grpc_addr, grpc_tx).await
+            {
+                eprintln!("[gRPC] Listener stopped: {e}");
             }
         });
 

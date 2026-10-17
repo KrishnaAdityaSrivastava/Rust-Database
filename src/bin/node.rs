@@ -11,6 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut local_id_val: Option<u64> = None;
     let mut local_addr: Option<String> = None;
     let mut api_addr: Option<String> = None;
+    let mut grpc_addr: Option<String> = None;
     let mut peer_args: Vec<String> = Vec::new();
     let mut data_dir: Option<PathBuf> = None;
 
@@ -38,6 +39,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 i += 1;
                 if i < args.len() {
                     api_addr = Some(args[i].clone());
+                }
+            }
+            "--grpc-addr" => {
+                i += 1;
+                if i < args.len() {
+                    grpc_addr = Some(args[i].clone());
                 }
             }
             "--peers" => {
@@ -78,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if local_id_val.is_none() || local_addr.is_none() {
         eprintln!("Usage:");
         eprintln!(
-            "cargo run --bin node -- --id <id> --addr <raft_addr> --api-addr <api_addr> --peers <id:addr,id:addr> [--dir <path>]"
+            "cargo run --bin node -- --id <id> --addr <raft_addr> --api-addr <api_addr> --grpc-addr <grpc_addr> --peers <id:addr,id:addr> [--dir <path>]"
         );
         eprintln!("\nExample:");
         eprintln!("  cargo run --bin node -- 1 127.0.0.1:6001 2:127.0.0.1:6002 3:127.0.0.1:6003");
@@ -105,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let api_addr = api_addr.unwrap_or_else(|| format!("127.0.0.1:{}", 7000 + id_num));
+    let grpc_addr = grpc_addr.unwrap_or_else(|| format!("127.0.0.1:{}", 8000 + id_num));
 
     let dir =
         data_dir.unwrap_or_else(|| std::env::temp_dir().join(format!("kv_store_node_{}", id_num)));
@@ -113,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(" Starting Raft Node {}", local_id.id);
     println!(" Address:   {}", addr);
     println!(" API Addr:  {}", api_addr);
+    println!(" gRPC Addr: {}", grpc_addr);
     println!(" Data Dir:  {}", dir.display());
     println!(" Peers:     {:?}", peers_map);
     println!(
@@ -128,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let node = RaftNode::new_in_dir(&dir, local_id, peer_ids, Config::default());
     let network = Network::new(local_id, addr, peers_map);
 
-    let _tx = network.start_with_api(node, api_addr).await;
+    let _tx = network.start_with_api(node, api_addr, grpc_addr).await;
 
     println!(
         "Node {} is active and listening for peers/clients.",

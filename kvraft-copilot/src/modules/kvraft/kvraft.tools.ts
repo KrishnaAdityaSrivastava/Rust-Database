@@ -52,8 +52,7 @@ export class KVRaftTools {
       });
     } catch (error) {
       throw new Error(
-        `Cannot reach KVRaft gateway at ${this.baseUrl}: ${
-          error instanceof Error ? error.message : String(error)
+        `Cannot reach KVRaft gateway at ${this.baseUrl}: ${error instanceof Error ? error.message : String(error)
         }`,
       );
     }
@@ -71,8 +70,7 @@ export class KVRaftTools {
 
     if (!response.ok) {
       throw new Error(
-        `KVRaft gateway returned HTTP ${response.status}: ${
-          result.message ?? body
+        `KVRaft gateway returned HTTP ${response.status}: ${result.message ?? body
         }`,
       );
     }

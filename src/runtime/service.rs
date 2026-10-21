@@ -13,6 +13,8 @@ pub enum ServiceOperation {
     Delete { key: String },
     Get { key: String },
     Status,
+    AddNode { id: u64, addr: String },
+    RemoveNode { id: u64 },
 }
 
 pub struct ServiceRequest {
@@ -31,10 +33,26 @@ pub struct ServiceResponse {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "UPPERCASE")]
 enum WireRequest {
-    Set { key: String, value: WireValue },
-    Get { key: String },
-    Delete { key: String },
+    Set {
+        key: String,
+        value: WireValue,
+    },
+    Get {
+        key: String,
+    },
+    Delete {
+        key: String,
+    },
     Status,
+    AddNode {
+        #[serde(rename = "node_id")]
+        id: u64,
+        addr: String,
+    },
+    RemoveNode {
+        #[serde(rename = "node_id")]
+        id: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -124,6 +142,14 @@ async fn handle_connection(
                     WireRequest::Get { key } => ServiceOperation::Get { key },
                     WireRequest::Delete { key } => ServiceOperation::Delete { key },
                     WireRequest::Status => ServiceOperation::Status,
+                    WireRequest::AddNode { id, addr } => {
+                        if id == 0 || addr.trim().is_empty() {
+                            // Handle invalid membership requests before submitting them.
+                            // See the validation note below.
+                        }
+                        ServiceOperation::AddNode { id, addr }
+                    }
+                    WireRequest::RemoveNode { id } => ServiceOperation::RemoveNode { id },
                 };
 
                 let (response_tx, response_rx) = oneshot::channel();

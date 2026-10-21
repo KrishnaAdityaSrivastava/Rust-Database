@@ -36,6 +36,9 @@ impl RaftNode {
         self.current_term += 1;
 
         self.voted_for = Some(self.id);
+        // Persist term + vote immediately: if we crash mid-election we must not
+        // re-vote for a different candidate in the same term on restart.
+        self.persist_meta();
 
         self.votes_received.clear();
         self.votes_received.insert(self.id);
@@ -148,6 +151,9 @@ impl RaftNode {
         }
 
         self.voted_for = Some(request.candidate_id);
+        // Durable vote grant: must survive a crash so we don't accidentally
+        // vote for a second candidate in the same term after restart.
+        self.persist_meta();
 
         // Only reset because we actually granted the vote.
         self.reset_election_timeout(now);

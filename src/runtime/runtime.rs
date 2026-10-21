@@ -96,20 +96,59 @@ impl<T: Transport + 'static> Runtime<T> {
     }
 
     fn handle_service_request(&mut self, request: ServiceRequest) {
+        use crate::raft::message::{AddNode, RemoveNode};
         use crate::raft::request::{Responder, StoreOperation, StoreRequest};
+        use crate::runtime::service::ServiceResponse;
 
-        let store_op = match request.operation {
-            ServiceOperation::Set { key, value } => StoreOperation::Set { key, value },
-            ServiceOperation::Delete { key } => StoreOperation::Delete { key },
-            ServiceOperation::Get { key } => StoreOperation::Get { key },
-            ServiceOperation::Status => StoreOperation::Status,
-        };
+        let now = Instant::now();
 
-        let store_req = StoreRequest {
-            operation: store_op,
-            responder: Responder::Oneshot(request.response_tx),
-        };
+        match request.operation {
+            ServiceOperation::AddNode { id, addr } => {
+                self.node.handle_message(
+                    Message::AddNode(AddNode {
+                        id: NodeId { id },
+                        addr,
+                    }),
+                    now,
+                );
 
-        self.node.handle_store_request(store_req, Instant::now());
+                let _ = request.response_tx.send(ServiceResponse {
+                    success: true,
+                    value: None,
+                    message: "Add-node request submitted to Raft".into(),
+                    leader_id: None,
+                    term: 0,
+                });
+            }
+
+            ServiceOperation::RemoveNode { id } => {
+                self.node.handle_message(Message::RemoveNode(RemoveNode { id: NodeId { id } }), now);
+
+                let _ = request.response_tx.send(ServiceResponse {
+                    success: true,
+                    value: None,
+                    message: "Remove-node request submitted to Raft".into(),
+                    leader_id: None,
+                    term: 0,
+                });
+            }
+
+            operation => {
+                let store_op = match operation {
+                    ServiceOperation::Set { key, value } => StoreOperation::Set { key, value },
+                    ServiceOperation::Delete { key } => StoreOperation::Delete { key },
+                    ServiceOperation::Get { key } => StoreOperation::Get { key },
+                    ServiceOperation::Status => StoreOperation::Status,
+                    _ => unreachable!("membership operations handled above"),
+                };
+
+                let store_req = StoreRequest {
+                    operation: store_op,
+                    responder: Responder::Oneshot(request.response_tx),
+                };
+
+                self.node.handle_store_request(store_req, now);
+            }
+        }
     }
 }

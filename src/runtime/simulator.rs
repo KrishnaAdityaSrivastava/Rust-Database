@@ -5,13 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::database::Config;
-use crate::raft::message::Message;
-use crate::raft::node::{NodeId, RaftNode, Role};
 use super::fault::{
     ChaosConfig, DeterministicRng, Fault, InvariantViolation, LinkFaultPolicy, ScheduledFault,
 };
 use super::runtime::{Clock, Transport};
+use crate::database::Config;
+use crate::raft::message::Message;
+use crate::raft::node::{NodeId, RaftNode, Role};
 
 /// An event in the simulated network.
 #[derive(Debug, Clone)]
@@ -273,31 +273,17 @@ impl Simulation {
     // Packet-Level Fault Policies
     // -------------------------------------------------------------------------
 
-    pub fn drop_packets(
-        &mut self,
-        from: impl Into<NodeId>,
-        to: impl Into<NodeId>,
-        count: usize,
-    ) {
+    pub fn drop_packets(&mut self, from: impl Into<NodeId>, to: impl Into<NodeId>, count: usize) {
         let key = (from.into(), to.into());
         self.link_policies.entry(key).or_default().drop_remaining += count;
     }
 
-    pub fn delay_link(
-        &mut self,
-        from: impl Into<NodeId>,
-        to: impl Into<NodeId>,
-        delay: Duration,
-    ) {
+    pub fn delay_link(&mut self, from: impl Into<NodeId>, to: impl Into<NodeId>, delay: Duration) {
         let key = (from.into(), to.into());
         self.link_policies.entry(key).or_default().delay = Some(delay);
     }
 
-    pub fn clear_link_delay(
-        &mut self,
-        from: impl Into<NodeId>,
-        to: impl Into<NodeId>,
-    ) {
+    pub fn clear_link_delay(&mut self, from: impl Into<NodeId>, to: impl Into<NodeId>) {
         let key = (from.into(), to.into());
         if let Some(policy) = self.link_policies.get_mut(&key) {
             policy.delay = None;
@@ -350,9 +336,12 @@ impl Simulation {
             Fault::DropPackets { from, to, count } => self.drop_packets(from, to, count),
             Fault::DelayLink { from, to, delay } => self.delay_link(from, to, delay),
             Fault::ClearLinkDelay { from, to } => self.clear_link_delay(from, to),
-            Fault::DuplicatePackets { from, to, count, delay } => {
-                self.duplicate_packets(from, to, count, delay)
-            }
+            Fault::DuplicatePackets {
+                from,
+                to,
+                count,
+                delay,
+            } => self.duplicate_packets(from, to, count, delay),
             Fault::TriggerElection(id) => self.start_election(id),
             Fault::SubmitCommand { node_id, command } => {
                 let now = self.now();
@@ -679,24 +668,30 @@ impl Simulation {
         }
 
         // 3. State Machine / Commit Safety
+        // 3. State Machine / Commit Safety
         for i in 0..node_list.len() {
             for j in (i + 1)..node_list.len() {
                 let (id_a, node_a) = node_list[i];
                 let (id_b, node_b) = node_list[j];
+
                 let common_commit = node_a.commit_index.min(node_b.commit_index);
+
                 for idx in 1..=common_commit {
-                    if idx < node_a.log.len() && idx < node_b.log.len() {
-                        let cmd_a = format!("{:?}", node_a.log[idx].record.command);
-                        let cmd_b = format!("{:?}", node_b.log[idx].record.command);
-                        if cmd_a != cmd_b {
-                            return Err(InvariantViolation::StateSafetyViolation {
-                                index: idx,
-                                node_a: id_a.id,
-                                node_b: id_b.id,
-                                entry_a: cmd_a,
-                                entry_b: cmd_b,
-                            });
-                        }
+                    if idx >= node_a.log.len() || idx >= node_b.log.len() {
+                        continue;
+                    }
+
+                    let entry_a = &node_a.log[idx].payload;
+                    let entry_b = &node_b.log[idx].payload;
+
+                    if entry_a != entry_b {
+                        return Err(InvariantViolation::StateSafetyViolation {
+                            index: idx,
+                            node_a: id_a.id,
+                            node_b: id_b.id,
+                            entry_a: format!("{entry_a:?}"),
+                            entry_b: format!("{entry_b:?}"),
+                        });
                     }
                 }
             }

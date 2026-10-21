@@ -166,7 +166,10 @@ impl ClusterClient {
         let stream = match self.stream.as_mut() {
             Some(s) => s,
             None => {
-                eprintln!("Not connected to node at {}. Try 'connect <ip:port>'.", self.addr);
+                eprintln!(
+                    "Not connected to node at {}. Try 'connect <ip:port>'.",
+                    self.addr
+                );
                 return None;
             }
         };
@@ -178,24 +181,45 @@ impl ClusterClient {
         }
 
         let len = buf.len() as u32;
-        if stream.write_all(&len.to_be_bytes()).await.is_err() || stream.write_all(&buf).await.is_err() {
+        if stream.write_all(&len.to_be_bytes()).await.is_err()
+            || stream.write_all(&buf).await.is_err()
+        {
             eprintln!("Lost connection to node at {}.", self.addr);
             self.stream = None;
             return None;
         }
 
         // Read response header length
+        // Read response header length.
         let mut len_buf = [0u8; 4];
-        if stream.read_exact(&mut len_buf).await.is_err() {
-            eprintln!("Failed to read response from node.");
+
+        if let Err(e) = stream.read_exact(&mut len_buf).await {
+            eprintln!("Failed to read response header from {}: {}", self.addr, e);
             self.stream = None;
             return None;
         }
 
         let resp_len = u32::from_be_bytes(len_buf) as usize;
+        eprintln!(
+            "Server {} announced response length: {}",
+            self.addr, resp_len
+        );
+
+        const MAX_RESPONSE_SIZE: usize = 16 * 1024 * 1024;
+
+        if resp_len == 0 || resp_len > MAX_RESPONSE_SIZE {
+            eprintln!("Invalid response length: {}", resp_len);
+            self.stream = None;
+            return None;
+        }
+
         let mut resp_buf = vec![0u8; resp_len];
-        if stream.read_exact(&mut resp_buf).await.is_err() {
-            eprintln!("Failed to read response payload.");
+
+        if let Err(e) = stream.read_exact(&mut resp_buf).await {
+            eprintln!(
+                "Failed to read {} response bytes from {}: {}",
+                resp_len, self.addr, e
+            );
             self.stream = None;
             return None;
         }
@@ -207,7 +231,13 @@ impl ClusterClient {
                 None
             }
             Err(e) => {
-                eprintln!("Deserialization error: {}", e);
+                eprintln!(
+                    "Deserialization error from {} ({} bytes): {}",
+                    self.addr,
+                    resp_buf.len(),
+                    e
+                );
+                eprintln!("Response bytes: {:02x?}", resp_buf);
                 None
             }
         }
@@ -228,6 +258,15 @@ impl ClusterClient {
             println!(" Connected Node ID: {}", resp.node_id.id);
             println!(" Role:              {}", resp.role);
             println!(" Current Term:      {}", resp.term);
+            print!(" Peers:             ");
+            if resp.peers.is_empty() {
+                println!("<None>");
+            } else {
+                for peer in &resp.peers {
+                    print!("{} ", peer.id);
+                }
+                println!();
+            }
             if let Some(l) = resp.leader_id {
                 println!(" Known Leader ID:   {}", l.id);
             } else {

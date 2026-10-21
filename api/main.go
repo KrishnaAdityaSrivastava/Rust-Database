@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,11 +12,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
-	"time"
 	"sync"
-	"sort"
+	"time"
 )
 
 const (
@@ -60,9 +59,11 @@ type WireValue struct {
 }
 
 type WireRequest struct {
-	Op    string     `json:"op"`
-	Key   string     `json:"key,omitempty"`
-	Value *WireValue `json:"value,omitempty"`
+	Op     string     `json:"op"`
+	Key    string     `json:"key,omitempty"`
+	Value  *WireValue `json:"value,omitempty"`
+	NodeID uint64     `json:"node_id,omitempty"`
+	Addr   string     `json:"addr,omitempty"`
 }
 
 type WireResponse struct {
@@ -73,15 +74,15 @@ type WireResponse struct {
 	Term     uint64          `json:"term"`
 }
 type NodeHealth struct {
-	NodeID    uint64 `json:"node_id"`
-	Address   string `json:"address"`
-	Reachable bool   `json:"reachable"`
-	Healthy   bool   `json:"healthy"`
-	LatencyMS int64  `json:"latency_ms"`
-	Message   string `json:"message,omitempty"`
-	Error     string `json:"error,omitempty"`
+	NodeID    uint64  `json:"node_id"`
+	Address   string  `json:"address"`
+	Reachable bool    `json:"reachable"`
+	Healthy   bool    `json:"healthy"`
+	LatencyMS int64   `json:"latency_ms"`
+	Message   string  `json:"message,omitempty"`
+	Error     string  `json:"error,omitempty"`
 	LeaderID  *uint64 `json:"leader_id,omitempty"`
-	Term      uint64 `json:"term,omitempty"`
+	Term      uint64  `json:"term,omitempty"`
 }
 
 func validateValue(v WireValue) error {
@@ -105,9 +106,6 @@ func validateValue(v WireValue) error {
 		return errors.New("type must be string, int, or float")
 	}
 
-	if !json.Valid(v.Value) {
-		return errors.New("invalid JSON value")
-	}
 	return nil
 }
 
@@ -131,12 +129,7 @@ func callRust(ctx context.Context, addr string, req WireRequest) (WireResponse, 
 		return result, fmt.Errorf("send request to Rust: %w", err)
 	}
 
-	line, err := bufio.NewReader(conn).ReadBytes('\n')
-	if err != nil {
-		return result, fmt.Errorf("read response from Rust: %w", err)
-	}
-
-	if err := json.Unmarshal(bytes.TrimSpace(line), &result); err != nil {
+	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&result); err != nil {
 		return result, fmt.Errorf("decode Rust response: %w", err)
 	}
 
@@ -452,11 +445,10 @@ func handleNodeHealth(w http.ResponseWriter, r *http.Request) {
 		"success":       allHealthy,
 		"cluster_size":  len(results),
 		"healthy_nodes": healthyCount,
-		"message":      fmt.Sprintf("%d/%d nodes responding healthily", healthyCount, len(results)),
+		"message":       fmt.Sprintf("%d/%d nodes responding healthily", healthyCount, len(results)),
 		"nodes":         results,
 	})
 }
-
 
 // handleNodeDetail serves GET /health/node/{id}.
 // It contacts that specific node directly and returns its health.
@@ -787,16 +779,77 @@ func handleRecoveryRecommend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func handleAddNode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	defer r.Body.Close()
+
+	var req struct {
+		ID   uint64 `json:"id"`
+		Addr string `json:"addr"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "expected JSON with id and addr",
+		})
+		return
+	}
+
+	if req.ID == 0 || strings.TrimSpace(req.Addr) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "id and addr are required",
+		})
+		return
+	}
+
+	forwardRust(w, r, WireRequest{
+		Op:     "ADDNODE",
+		NodeID: req.ID,
+		Addr:   req.Addr,
+	})
+}
+
+func handleRemoveNode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		w.Header().Set("Allow", "DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	id, err := strconv.ParseUint(r.URL.Query().Get("id"), 10, 64)
+	if err != nil || id == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "a valid node id is required",
+		})
+		return
+	}
+
+	forwardRust(w, r, WireRequest{
+		Op:     "REMOVENODE",
+		NodeID: id,
+	})
+}
+
 func main() {
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("/kv/", handleKV)
 	mux.HandleFunc("/status", handleStatus)
 	mux.Handle("/metrics", promhttp.Handler())
+
 	mux.HandleFunc("/health/nodes", handleNodeHealth)
 	mux.HandleFunc("/health/node/", handleNodeDetail)
 	mux.HandleFunc("/errors/recent", handleRecentErrors)
 	mux.HandleFunc("/diagnose", handleDiagnose)
 	mux.HandleFunc("/recovery/recommend", handleRecoveryRecommend)
+	mux.HandleFunc("/nodes/add", handleAddNode)
+	mux.HandleFunc("/nodes/remove", handleRemoveNode)
 
 	server := &http.Server{
 		Addr:              httpAddr,
@@ -805,9 +858,10 @@ func main() {
 	}
 
 	log.Printf("Go REST API listening on %s", httpAddr)
-	log.Printf("Forwarding requests to Rust service at %s", rustAddr)
+	log.Printf("Forwarding requests to Rust cluster; preferred node: %s", rustAddr)
 
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := server.ListenAndServe(); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
 }

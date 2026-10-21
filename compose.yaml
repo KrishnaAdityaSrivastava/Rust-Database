@@ -1,5 +1,6 @@
 services:
   node1:
+    image: kvraft-node:local
     build:
       context: .
       dockerfile: Dockerfile
@@ -98,6 +99,8 @@ services:
       NODE_ENV: production
     ports:
       - "3001:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - api
     restart: unless-stopped
@@ -136,7 +139,8 @@ services:
 
 networks:
   kvnet:
-    driver: bridge
+    name: kvnet
+    external: true
 
 volumes:
   node1_data:

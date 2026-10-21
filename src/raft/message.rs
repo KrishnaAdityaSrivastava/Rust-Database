@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use super::node::{LogEntry, NodeId, RaftNode};
 use super::request::{Responder, StoreOperation, StoreRequest};
+use crate::Role;
+use crate::raft::node::EntryPayload;
 use crate::wal::log_record::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +75,17 @@ pub struct ClientResponse {
     pub node_id: NodeId,
     pub role: String,
     pub term: u64,
+    pub peers: Vec<NodeId>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddNode {
+    pub id: NodeId,
+    pub addr: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveNode {
+    pub id: NodeId,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,10 +102,12 @@ pub enum Message {
     StatusQuery(StatusQuery),
     ClientResponse(ClientResponse),
 
+    AddNode(AddNode),
+    RemoveNode(RemoveNode),
+
     //remove this branch later
     Timeout,
 }
-
 
 impl RaftNode {
     pub fn handle_message(&mut self, message: Message, now: Instant) {
@@ -102,10 +117,8 @@ impl RaftNode {
 
                 let response = self.handle_request_vote(request, now);
 
-                self.outbox.push((
-                    candidate_id,
-                    Message::RequestVoteResponse(response),
-                ));
+                self.outbox
+                    .push((candidate_id, Message::RequestVoteResponse(response)));
             }
 
             Message::RequestVoteResponse(response) => {
@@ -117,10 +130,8 @@ impl RaftNode {
 
                 let response = self.handle_append_entries(entries, now);
 
-                self.outbox.push((
-                    leader_id,
-                    Message::AppendEntriesResponse(response),
-                ));
+                self.outbox
+                    .push((leader_id, Message::AppendEntriesResponse(response)));
             }
 
             Message::AppendEntriesResponse(response) => {
@@ -138,10 +149,7 @@ impl RaftNode {
                         );
                     }
 
-                    self.outbox.push((
-                        leader_id,
-                        Message::ClientCommand(cmd),
-                    ));
+                    self.outbox.push((leader_id, Message::ClientCommand(cmd)));
                 } else if super::is_log_enabled() {
                     println!(
                         "Node {} is not leader and no leader is known yet, dropping command",
@@ -185,6 +193,31 @@ impl RaftNode {
                     },
                 };
                 self.handle_store_request(store_req, now);
+            }
+
+            Message::AddNode(request) => {
+                if self.role != Role::Leader {
+                    if let Some(leader_id) = self.leader_id {
+                        self.outbox.push((leader_id, Message::AddNode(request)));
+                    }
+                    return;
+                }
+
+                self.append_membership_change(EntryPayload::AddNode {
+                    id: request.id,
+                    addr: request.addr,
+                });
+            }
+
+            Message::RemoveNode(request) => {
+                if self.role != Role::Leader {
+                    if let Some(leader_id) = self.leader_id {
+                        self.outbox.push((leader_id, Message::RemoveNode(request)));
+                    }
+                    return;
+                }
+
+                self.append_membership_change(EntryPayload::RemoveNode { id: request.id });
             }
 
             Message::ClientResponse(_) => {}

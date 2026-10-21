@@ -16,6 +16,13 @@ use crate::runtime::service::ServiceRequest;
 //     pub message: Message,
 // }
 
+/// Commands for managing cluster membership from the Raft node to the network layer.
+#[derive(Debug, Clone)]
+pub enum PeerChange {
+    AddPeer { id: NodeId, addr: String },
+    RemovePeer { id: NodeId },
+}
+
 struct NetworkTransport {
     active_senders: Arc<RwLock<HashMap<NodeId, UnboundedSender<Message>>>>,
 }
@@ -30,22 +37,30 @@ impl Transport for NetworkTransport {
     }
 }
 
+type PeerRegistry = Arc<RwLock<HashMap<NodeId, String>>>;
 pub struct Network {
     local_id: NodeId,
     local_addr: String,
-    peers: HashMap<NodeId, String>,
+    peers: PeerRegistry,
 
     // Peer NodeId -> channel used by the writer task.
     active_senders: Arc<RwLock<HashMap<NodeId, UnboundedSender<Message>>>>,
+
+    // Channel for receiving peer management commands from the Raft node.
+    peer_changes_tx: UnboundedSender<PeerChange>,
+    peer_changes_rx: tokio::sync::mpsc::UnboundedReceiver<PeerChange>,
 }
 
 impl Network {
     pub fn new(local_id: NodeId, local_addr: String, peers: HashMap<NodeId, String>) -> Self {
+        let (peer_changes_tx, peer_changes_rx) = mpsc::unbounded_channel::<PeerChange>();
         Self {
             local_id,
             local_addr,
-            peers,
+            peers: Arc::new(RwLock::new(peers)),
             active_senders: Arc::new(RwLock::new(HashMap::new())),
+            peer_changes_tx,
+            peer_changes_rx,
         }
     }
 
@@ -55,6 +70,13 @@ impl Network {
         self.start_with_api(node, api_addr, grpc_addr).await
     }
 
+    /// Returns a sender for peer management commands (add/remove peers).
+    /// This should be given to the RaftNode so it can notify the network layer
+    /// when membership changes are committed and applied.
+    pub fn peer_changes_sender(&self) -> UnboundedSender<PeerChange> {
+        self.peer_changes_tx.clone()
+    }
+
     pub async fn start_with_api(
         self,
         node: RaftNode,
@@ -62,6 +84,9 @@ impl Network {
         grpc_addr: String,
     ) -> UnboundedSender<Message> {
         let local_id = self.local_id;
+        let peer_changes_rx = self.peer_changes_rx;
+        let peers_registry = self.peers.clone();
+        let active_senders = self.active_senders.clone();
 
         let (node_tx, node_rx) = mpsc::unbounded_channel::<Message>();
         let (service_tx, service_rx) = mpsc::unbounded_channel::<ServiceRequest>();
@@ -124,42 +149,52 @@ impl Network {
         });
 
         let reconnect_senders = self.active_senders.clone();
-        let reconnect_peers = self.peers.clone();
         let reconnect_node_tx = node_tx.clone();
+
+        let reconnect_peers = self.peers.clone();
 
         tokio::spawn(async move {
             loop {
-                for (peer_id, peer_addr) in &reconnect_peers {
+                let peers: Vec<(NodeId, String)> = {
+                    reconnect_peers
+                        .read()
+                        .unwrap()
+                        .iter()
+                        .map(|(id, addr)| (*id, addr.clone()))
+                        .collect()
+                };
+
+                for (peer_id, peer_addr) in peers {
                     if local_id.id <= peer_id.id {
                         continue;
                     }
 
-                    let is_connected = { reconnect_senders.read().unwrap().contains_key(peer_id) };
+                    let is_connected = { reconnect_senders.read().unwrap().contains_key(&peer_id) };
 
                     if is_connected {
                         continue;
                     }
 
-                    match TcpStream::connect(peer_addr).await {
-                        Ok(stream) => {
-                            Self::handle_outgoing_connection(
-                                local_id,
-                                *peer_id,
-                                stream,
-                                reconnect_senders.clone(),
-                                reconnect_node_tx.clone(),
-                            )
-                            .await;
-                        }
-
-                        Err(_) => {
-                            // Peer may simply be offline.
-                        }
+                    if let Ok(stream) = TcpStream::connect(&peer_addr).await {
+                        Self::handle_outgoing_connection(
+                            local_id,
+                            peer_id,
+                            stream,
+                            reconnect_senders.clone(),
+                            reconnect_node_tx.clone(),
+                        )
+                        .await;
                     }
                 }
 
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }
+        });
+
+        // Spawn task to handle peer management commands from the Raft node
+        let peer_changes_node_tx = node_tx.clone();
+        tokio::spawn(async move {
+            Self::handle_peer_changes(local_id, peer_changes_rx, peers_registry, active_senders, peer_changes_node_tx).await;
         });
 
         let grpc_tx = service_tx.clone();
@@ -344,5 +379,65 @@ impl Network {
                 println!("Connection to Node {} lost", peer_id.id);
             }
         });
+    }
+
+    /// Handles peer management commands (add/remove) from the Raft node.
+    /// This runs as a background task and updates the peer registry and connections.
+    async fn handle_peer_changes(
+        local_id: NodeId,
+        mut peer_changes_rx: tokio::sync::mpsc::UnboundedReceiver<PeerChange>,
+        peers_registry: PeerRegistry,
+        active_senders: Arc<RwLock<HashMap<NodeId, UnboundedSender<Message>>>>,
+        node_tx: UnboundedSender<Message>,
+    ) {
+        while let Some(change) = peer_changes_rx.recv().await {
+            match change {
+                PeerChange::AddPeer { id, addr } => {
+                    if super::is_log_enabled() {
+                        println!("Node {} adding peer {} at {}", local_id.id, id.id, addr);
+                    }
+
+                    // Add to peer registry
+                    {
+                        let mut peers = peers_registry.write().unwrap();
+                        peers.insert(id, addr.clone());
+                    }
+
+                    // If our ID is greater, initiate connection (per the reconnect logic)
+                    if local_id.id > id.id {
+                        if let Ok(stream) = TcpStream::connect(&addr).await {
+                            Self::handle_outgoing_connection(
+                                local_id,
+                                id,
+                                stream,
+                                active_senders.clone(),
+                                node_tx.clone(),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                PeerChange::RemovePeer { id } => {
+                    if super::is_log_enabled() {
+                        println!("Node {} removing peer {}", local_id.id, id.id);
+                    }
+
+                    // Remove from peer registry
+                    {
+                        let mut peers = peers_registry.write().unwrap();
+                        peers.remove(&id);
+                    }
+
+                    // Close existing connection if any
+                    {
+                        let mut senders = active_senders.write().unwrap();
+                        if let Some(sender) = senders.remove(&id) {
+                            // Dropping the sender will cause the writer task to terminate
+                            drop(sender);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

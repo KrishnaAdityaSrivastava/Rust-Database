@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use tempfile::tempdir;
 
 use crate::database::{Config, Database};
+use crate::raft::node::EntryPayload;
 use crate::raft::{Role, Simulation};
 use crate::wal::log_record::{Command, Value};
 
@@ -70,18 +71,49 @@ impl TestCluster {
 
     /// Drains newly committed log entries into each node's local database.
     pub fn apply_committed(&mut self) {
-        for (&node_id, node) in self.sim.nodes.iter() {
-            let db = self.databases.get(&node_id.id).unwrap();
-            let applied = self.db_applied.get_mut(&node_id.id).unwrap();
-            while *applied < node.commit_index {
-                *applied += 1;
-                if *applied < node.log.len() {
-                    if let Command::Set { key: k, value: v } =
-                        node.log[*applied].record.command()
-                    {
-                        db.insert(k.clone(), v.clone()).unwrap();
+        let committed_entries: Vec<(u64, Vec<(usize, EntryPayload)>)> = self
+            .sim
+            .nodes
+            .iter()
+            .map(|(&node_id, node)| {
+                let applied = *self.db_applied.get(&node_id.id).unwrap();
+
+                let entries = ((applied + 1)..=node.commit_index)
+                    .filter_map(|index| {
+                        node.log
+                            .get(index)
+                            .map(|entry| (index, entry.payload.clone()))
+                    })
+                    .collect();
+
+                (node_id.id, entries)
+            })
+            .collect();
+
+        for (node_id, entries) in committed_entries {
+            let db = self.databases.get(&node_id).unwrap();
+
+            for (index, payload) in entries {
+                match payload {
+                    EntryPayload::Command(record) => match record.command {
+                        Command::Set { key, value } => {
+                            db.insert(key, value).unwrap();
+                        }
+                        Command::Delete { key } => {
+                            db.delete(key).unwrap();
+                        }
+                    },
+
+                    EntryPayload::AddNode { .. } => {
+                        // Configuration entries do not modify the key-value database.
+                    }
+
+                    EntryPayload::RemoveNode { .. } => {
+                        // Configuration entries do not modify the key-value database.
                     }
                 }
+
+                self.db_applied.insert(node_id, index);
             }
         }
     }

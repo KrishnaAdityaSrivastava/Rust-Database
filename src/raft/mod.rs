@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod election;
+pub mod log_store;
 pub mod message;
 pub mod network;
 pub mod node;

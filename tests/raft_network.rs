@@ -1,4 +1,5 @@
 use kv_store::Config;
+use kv_store::raft::node::EntryPayload;
 use kv_store::raft::{Message, Network, NodeId, RaftNode};
 use kv_store::wal::log_record::{Command, LogRecord, Value};
 use std::collections::HashMap;
@@ -91,13 +92,13 @@ fn test_message_serialization() {
         prev_log_term: 0,
         entries: vec![LogEntry {
             term: 1,
-            record: LogRecord::new(
+            payload: EntryPayload::Command(LogRecord::new(
                 1,
                 Command::Set {
                     key: "x".to_string(),
                     value: Value::String("y".to_string()),
                 },
-            ),
+            )),
         }],
         leader_commit: 1,
     });

@@ -1,9 +1,10 @@
 use std::time::Duration;
 
+use kv_store::raft::node::EntryPayload;
 use kv_store::raft::{
     ChaosConfig, Fault, NodeId, Role, Simulation,
 };
-use kv_store::wal::log_record::{Command, Value};
+use kv_store::wal::log_record::{Command, LogRecord, Value};
 
 fn string(val: &str) -> Value {
     Value::String(val.to_string())
@@ -308,11 +309,11 @@ fn test_complex_partition_and_healing() {
     assert_eq!(sim[1].role, Role::Follower);
     assert_eq!(sim[1].commit_index, 1);
     assert_eq!(
-        sim[1].log[1].record.command(),
-        &Command::Set {
+        sim[1].log[1].payload,
+        EntryPayload::Command(LogRecord::new(0, Command::Set {
             key: "majority".into(),
             value: string("committed"),
-        }
+        }))
     );
 
     sim.check_invariants().expect("Invariants must hold");

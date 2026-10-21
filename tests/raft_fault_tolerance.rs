@@ -1,4 +1,5 @@
 use kv_store::raft::{LogEntry, Message, NodeId, Role, Simulation};
+use kv_store::raft::node::EntryPayload;
 use kv_store::wal::log_record::{Command, LogRecord, Value};
 
 fn string(value: &str) -> Value {
@@ -197,11 +198,14 @@ fn test_log_conflict_resolution() {
     assert_eq!(node1_entry, node2_entry);
 
     assert_eq!(
-        node1_entry.record.command(),
-        &Command::Set {
-            key: "committed".into(),
-            value: string("correct"),
-        }
+        node1_entry.payload,
+        EntryPayload::Command(LogRecord::new(
+            2,
+            Command::Set {
+                key: "committed".into(),
+                value: string("correct"),
+            }
+        ))
     );
 }
 
@@ -261,11 +265,14 @@ fn test_network_partition_and_healing() {
     assert_eq!(cluster[1].commit_index, 1);
 
     assert_eq!(
-        cluster[1].log[1].record.command(),
-        &Command::Set {
-            key: "majority".into(),
-            value: string("pass"),
-        }
+        cluster[1].log[1].payload,
+        EntryPayload::Command(LogRecord::new(
+            1,
+            Command::Set {
+                key: "majority".into(),
+                value: string("pass"),
+            }
+        ))
     );
 }
 
@@ -317,13 +324,13 @@ fn test_message_reordering_safety() {
     // Leader appends cmd1 (index 1) and cmd2 (index 2)
     cluster[1].log.push(LogEntry {
         term: 1,
-        record: LogRecord::new(
+        payload: EntryPayload::Command(LogRecord::new(
             1,
             Command::Set {
                 key: "cmd1".into(),
                 value: string("v1"),
             },
-        ),
+        )),
     });
 
     // ae1 target index 1 (prev_log_index = 0)
@@ -332,13 +339,13 @@ fn test_message_reordering_safety() {
 
     cluster[1].log.push(LogEntry {
         term: 1,
-        record: LogRecord::new(
+        payload: EntryPayload::Command(LogRecord::new(
             2,
             Command::Set {
                 key: "cmd2".into(),
                 value: string("v2"),
             },
-        ),
+        )),
     });
 
     // ae2 target index 2 (prev_log_index = 1)
@@ -463,11 +470,14 @@ fn test_old_leader_returning_isolation() {
     assert_eq!(cluster[1].role, Role::Follower);
 
     assert_eq!(
-        cluster[1].log[1].record.command(),
-        &Command::Set {
-            key: "new".into(),
-            value: string("pass"),
-        }
+        cluster[1].log[1].payload,
+        EntryPayload::Command(LogRecord::new(
+            2,
+            Command::Set {
+                key: "new".into(),
+                value: string("pass"),
+            }
+        ))
     );
 }
 
@@ -487,13 +497,13 @@ fn test_uncommitted_vs_committed_visibility() {
 
         leader.log.push(LogEntry {
             term: 1,
-            record: LogRecord::new(
+            payload: EntryPayload::Command(LogRecord::new(
                 1,
                 Command::Set {
                     key: "visibility".into(),
                     value: string("test"),
                 },
-            ),
+            )),
         });
 
         // Create AppendEntries with leader_commit = 0 (uncommitted)
@@ -547,11 +557,11 @@ fn test_typed_value_replication() {
     cluster.route_messages();
 
     assert_eq!(
-        cluster[2].log[1].record.command(),
-        &Command::Set {
+        cluster[2].log[1].payload,
+        EntryPayload::Command(LogRecord::new(0, Command::Set {
             key: "integer".into(),
             value: Value::Int(42),
-        }
+        }))
     );
 }
 

@@ -1,6 +1,10 @@
 use std::time::Instant;
 
-use crate::lsm::wal::log_record::{Command, LogRecord};
+use crate::{
+    lsm::wal::log_record::{Command, LogRecord},
+    raft::network::PeerChange,
+    raft::node::EntryPayload,
+};
 
 use super::{
     message::{AppendEntries, AppendEntriesResponse, Message},
@@ -90,20 +94,24 @@ impl RaftNode {
             if index < self.log.len() {
                 // Existing entry conflicts with the leader's entry.
                 if self.log[index].term != incoming_entry.term {
-                    self.log.truncate(index);
-                    self.log.push(incoming_entry);
+                    self.truncate_log(index);
+                    self.push_log_entry(incoming_entry);
                 }
 
                 // Same term: the entry already exists.
             } else {
                 // The follower's log is shorter.
-                self.log.push(incoming_entry);
+                self.push_log_entry(incoming_entry);
             }
 
             index += 1;
         }
 
         self.commit_index = std::cmp::min(entries.leader_commit, self.log.len() - 1);
+
+        // Persist the new commit_index so that committed membership changes
+        // (AddNode / RemoveNode) survive a crash on this follower.
+        self.persist_meta();
 
         // Apply newly committed entries to the state machine.
         self.apply_committed_entries();
@@ -182,6 +190,10 @@ impl RaftNode {
             }
         }
 
+        // Persist the advanced commit_index before applying entries so that a
+        // crash after this point will replay from the correct position on restart.
+        self.persist_meta();
+
         // Apply everything that became committed.
         self.apply_committed_entries();
     }
@@ -195,9 +207,9 @@ impl RaftNode {
 
         let index = self.log.len();
 
-        self.log.push(LogEntry {
+        self.push_log_entry(LogEntry {
             term: self.current_term,
-            record: LogRecord::new(0, command),
+            payload: EntryPayload::Command(LogRecord::new(0, command)),
         });
 
         if self.peers.is_empty() {
@@ -216,15 +228,52 @@ impl RaftNode {
         while self.last_applied < self.commit_index {
             let index = self.last_applied + 1;
             let term = self.log[index].term;
-            let command = self.log[index].record.command.clone();
+            let mut result = Ok(());
+            let mut peer_change = None;
 
-            let result = match command {
-                Command::Set { key, value } => self.db.insert(key, value).map(|_| ()),
+            match self.log[index].payload.clone() {
+                EntryPayload::Command(record) => {
+                    result = match record.command {
+                        Command::Set { key, value } => self.db.insert(key, value).map(|_| ()),
+                        Command::Delete { key } => self.db.delete(key).map(|_| ()),
+                    };
 
-                Command::Delete { key } => self.db.delete(key).map(|_| ()),
-            };
+                    // Preserve your existing pending-request response handling here.
+                }
+
+                EntryPayload::AddNode { id, addr } => {
+                    if id != self.id && !self.peers.contains(&id) {
+                        self.peers.push(id);
+                    }
+
+                    // Only the leader needs replication progress for this peer.
+                    if self.role == Role::Leader {
+                        self.next_index.entry(id).or_insert(self.log.len());
+
+                        self.match_index.entry(id).or_insert(0);
+                    }
+
+                    peer_change = Some(PeerChange::AddPeer { id, addr });
+                }
+
+                EntryPayload::RemoveNode { id } => {
+                    self.peers.retain(|p| *p != id);
+
+                    self.next_index.remove(&id);
+                    self.match_index.remove(&id);
+
+                    peer_change = Some(PeerChange::RemovePeer { id });
+                }
+            }
 
             self.last_applied = index;
+
+            // Send peer change to network layer if any
+            if let Some(change) = peer_change {
+                if let Some(tx) = &self.peer_changes_tx {
+                    let _ = tx.send(change);
+                }
+            }
 
             if let Some(responder) = self.pending_requests.remove(&(index, term)) {
                 let (success, message) = match result {
@@ -241,6 +290,7 @@ impl RaftNode {
                 let leader_id = self.leader_id.or(Some(self.id));
                 let id = self.id;
                 let role = self.role;
+
                 responder.send(
                     success,
                     None,
@@ -249,6 +299,7 @@ impl RaftNode {
                     term,
                     id,
                     role,
+                    self.peers.clone(),
                     &mut self.outbox,
                 );
             } else if let Err(err) = result {

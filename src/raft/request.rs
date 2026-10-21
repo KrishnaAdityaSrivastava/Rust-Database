@@ -41,6 +41,7 @@ impl Responder {
         term: u64,
         node_id: NodeId,
         role: Role,
+        peers: Vec<NodeId>,
         outbox: &mut Vec<(NodeId, Message)>,
     ) {
         match self {
@@ -67,6 +68,7 @@ impl Responder {
                     node_id,
                     role: format!("{:?}", role),
                     term,
+                    peers,
                 });
                 outbox.push((client_id, response_msg));
             }

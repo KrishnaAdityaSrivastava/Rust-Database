@@ -6,21 +6,15 @@ import {
   z,
 } from '@nitrostack/core';
 
+import Docker from 'dockerode';
+
+const docker = new Docker({
+  socketPath: '/var/run/docker.sock',
+});
+
 type WireValue = {
   type: 'string' | 'int' | 'float';
   value: string | number;
-};
-
-type NodeHealth = {
-  node_id: number;
-  address: string;
-  reachable: boolean;
-  healthy: boolean;
-  latency_ms: number;
-  message?: string;
-  error?: string;
-  leader_id?: number | null;
-  term?: number;
 };
 
 type WireResponse = {
@@ -34,11 +28,48 @@ type WireResponse = {
   nodes?: NodeHealth[];
   [key: string]: any;
 };
+type NodeHealth = {
+  node_id: number;
+  address: string;
+  reachable: boolean;
+  healthy: boolean;
+  latency_ms: number;
+  message?: string;
+  error?: string;
+  leader_id?: number | null;
+  term?: number;
+};
+
 
 export class KVRaftTools {
   private readonly baseUrl = (
     process.env.KVRAFT_GATEWAY_URL ?? 'http://127.0.0.1:8080'
   ).replace(/\/+$/, '');
+
+  private async addNodeToCluster(
+    id: number,
+    addr: string,
+  ): Promise<WireResponse> {
+    return this.request('/nodes/add', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id,
+        addr,
+      }),
+    });
+  }
+
+  private async removeNodeFromCluster(
+    id: number,
+  ): Promise<WireResponse> {
+    return this.request(
+      `/nodes/remove?id=${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    );
+  }
 
   private async request(
     path: string,
@@ -578,35 +609,443 @@ export class KVRaftTools {
   }
 
   @Tool({
+    name: 'register_node',
+    description:
+      'Request adding a running KVRaft node to the cluster through a Raft membership change. The node must be reachable at its Raft address. This changes cluster membership.',
+    inputSchema: z.object({
+      node_id: z.number().int().min(1).max(999),
+      addr: z.string().min(1).max(255).describe(
+        'Raft address reachable by cluster peers, for example node4:6004',
+      ),
+    }),
+  })
+  async registerNode(
+    input: { node_id: number; addr: string },
+    ctx: ExecutionContext,
+  ) {
+    if (!/^[a-zA-Z0-9._-]+:\d{1,5}$/.test(input.addr)) {
+      throw new Error(
+        'addr must be a host:port address, such as node4:6004.',
+      );
+    }
+
+    const port = Number(input.addr.slice(input.addr.lastIndexOf(':') + 1));
+    if (port < 1 || port > 65535) {
+      throw new Error('addr port must be between 1 and 65535.');
+    }
+
+    const result = await this.addNodeToCluster(
+      input.node_id,
+      input.addr,
+    );
+
+    ctx.logger.info(
+      `Requested KVRaft membership addition for node ${input.node_id}`,
+    );
+
+    return {
+      node_id: input.node_id,
+      address: input.addr,
+      success: result.success,
+      message: result.message,
+      leader_id: result.leader_id ?? null,
+      term: result.term ?? null,
+    };
+  }
+
+  @Tool({
+    name: 'remove_node',
+    description:
+      'Request removing a node from KVRaft cluster membership through Raft. This changes cluster membership and may affect availability.',
+    inputSchema: z.object({
+      node_id: z.number().int().min(1).max(999),
+    }),
+  })
+  async removeNode(
+    input: { node_id: number },
+    ctx: ExecutionContext,
+  ) {
+    const result = await this.removeNodeFromCluster(input.node_id);
+
+    ctx.logger.info(
+      `Requested KVRaft membership removal for node ${input.node_id}`,
+    );
+
+    return {
+      node_id: input.node_id,
+      success: result.success,
+      message: result.message,
+      leader_id: result.leader_id ?? null,
+      term: result.term ?? null,
+    };
+  }
+
+  @Tool({
+    name: 'start_node',
+    description:
+      'Create and start a new KVRaft Docker node with a unique ID. ' +
+      'Automatically discovers existing cluster peers so the new node can connect to them on boot. ' +
+      'Does not change Raft membership on existing nodes — call register_node after this.',
+    inputSchema: z.object({
+      node_id: z.number().int().min(1).max(999),
+      peer_ids: z.array(z.number().int().min(1).max(999))
+        .max(20)
+        .default([])
+        .describe(
+          'Additional peer IDs to include beyond those auto-discovered from the running cluster. ' +
+          'Leave empty to rely entirely on auto-discovery.',
+        ),
+    }),
+    invocation: {
+      invoking: 'Starting KVRaft node...',
+      invoked: 'KVRaft node started',
+    },
+  })
+  async startNode(
+    input: { node_id: number; peer_ids: number[] },
+    ctx: ExecutionContext,
+  ) {
+    const id = input.node_id;
+    const explicitPeers = input.peer_ids ?? [];
+    const name = `node${id}`;
+    const raft = 6000 + id;
+    const api = 7000 + id;
+    const grpc = 8000 + id;
+
+    if (id < 1 || id > 999 || !Number.isInteger(id)) {
+      throw new Error('node_id must be an integer between 1 and 999.');
+    }
+
+    if (
+      explicitPeers.some(
+        peer =>
+          !Number.isInteger(peer) ||
+          peer < 1 ||
+          peer > 999 ||
+          peer === id,
+      ) ||
+      new Set(explicitPeers).size !== explicitPeers.length
+    ) {
+      throw new Error(
+        'Peer IDs must be unique integers between 1 and 999 and cannot include the node itself.',
+      );
+    }
+
+    // ── Auto-discover existing cluster peers ────────────────────────────────
+    // The new node must boot knowing about all current cluster members so its
+    // reconnect loop can establish outbound TCP connections to them.  Without
+    // this, existing nodes add the new node to their peer lists (via the Raft
+    // AddNode log entry) but the new node itself has an empty peer list and
+    // cannot reach anyone, resulting in one-sided connectivity.
+    const discoveredPeerIds: number[] = [];
+    try {
+      const healthResult = await this.request('/health/nodes');
+      if (Array.isArray(healthResult.nodes)) {
+        for (const node of healthResult.nodes as Array<{ node_id: number; reachable?: boolean }>) {
+          const peerId = node.node_id;
+          if (
+            Number.isInteger(peerId) &&
+            peerId >= 1 &&
+            peerId <= 999 &&
+            peerId !== id
+          ) {
+            discoveredPeerIds.push(peerId);
+          }
+        }
+      }
+    } catch {
+      // Cluster may not be up yet (bootstrapping first node); that is fine.
+      ctx.logger.info(
+        `Could not reach cluster to discover peers for node ${id}; starting with explicit peer list only.`,
+      );
+    }
+
+    // Merge discovered peers with any explicitly provided ones, deduplicating.
+    const allPeerIds = [
+      ...new Set([...discoveredPeerIds, ...explicitPeers]),
+    ].filter(p => p !== id);
+
+    ctx.logger.info(
+      `Node ${id}: discovered peers [${discoveredPeerIds.join(', ')}], ` +
+      `explicit peers [${explicitPeers.join(', ')}], ` +
+      `final peer list [${allPeerIds.join(', ')}]`,
+    );
+    // ────────────────────────────────────────────────────────────────────────
+
+    const existing = docker.getContainer(name);
+    let info;
+
+    try {
+      info = await existing.inspect();
+    } catch (error: any) {
+      if (error.statusCode !== 404) {
+        throw error;
+      }
+    }
+
+    // Reuse an existing container instead of creating a duplicate.
+    if (info) {
+      if (info.State.Running) {
+        return {
+          success: true,
+          node_id: id,
+          container: name,
+          status: 'already_running',
+          message:
+            `${name} is already running. Cluster membership was not changed.`,
+        };
+      }
+
+      await existing.start();
+
+      ctx.logger.info(`Started existing KVRaft container ${name}`);
+
+      return {
+        success: true,
+        node_id: id,
+        container: name,
+        status: 'started_existing',
+        message:
+          `${name} was started using its existing configuration and data. ` +
+          'Cluster membership was not changed.',
+      };
+    }
+
+    const cmd = [
+      '--id',
+      String(id),
+      '--addr',
+      `0.0.0.0:${raft}`,
+      '--api-addr',
+      `0.0.0.0:${api}`,
+      '--grpc-addr',
+      `0.0.0.0:${grpc}`,
+    ];
+
+    if (allPeerIds.length > 0) {
+      cmd.push(
+        '--peers',
+        allPeerIds
+          .map(peer => `${peer}:node${peer}:${6000 + peer}`)
+          .join(','),
+      );
+    }
+
+    cmd.push('--dir', '/data', '--log');
+
+    const container = await docker.createContainer({
+      Image: 'kvraft-node:local',
+      name,
+      Cmd: cmd,
+      ExposedPorts: {
+        [`${raft}/tcp`]: {},
+        [`${api}/tcp`]: {},
+        [`${grpc}/tcp`]: {},
+      },
+      HostConfig: {
+        NetworkMode: 'kvnet',
+        RestartPolicy: { Name: 'unless-stopped' },
+        Binds: [`node${id}_data:/data`],
+        PortBindings: {
+          [`${raft}/tcp`]: [{ HostPort: String(raft) }],
+          [`${api}/tcp`]: [{ HostPort: String(api) }],
+          [`${grpc}/tcp`]: [{ HostPort: String(grpc) }],
+        },
+      },
+    });
+
+    try {
+      await container.start();
+    } catch (error) {
+      await container.remove({ force: true }).catch(() => { });
+      throw error;
+    }
+
+    ctx.logger.info(`Started new KVRaft node ${id}`);
+
+    return {
+      success: true,
+      node_id: id,
+      container: name,
+      status: 'started',
+      ports: { raft, api, grpc },
+      peers: allPeerIds,
+      discovered_peers: discoveredPeerIds,
+      message:
+        `Node ${id} started with peer list [${allPeerIds.join(', ')}]. ` +
+        `Call register_node next to add it to the Raft cluster membership.`,
+    };
+  }
+
+  @Tool({
+    name: 'stop_node',
+    description:
+      'Stop a KVRaft node container without deleting the container or persistent data. This may affect cluster availability.',
+    inputSchema: z.object({
+      node_id: z.number().int().min(1).max(999),
+    }),
+    invocation: {
+      invoking: 'Stopping KVRaft node...',
+      invoked: 'KVRaft node stopped',
+    },
+  })
+  async stopNode(
+    input: { node_id: number },
+    ctx: ExecutionContext,
+  ) {
+    const name = `node${input.node_id}`;
+    const container = docker.getContainer(name);
+    const info = await container.inspect();
+
+    if (info.State.Running) {
+      await container.stop({ t: 10 });
+    }
+
+    ctx.logger.info(`Stopped KVRaft node ${input.node_id}`);
+
+    return {
+      success: true,
+      node_id: input.node_id,
+      status: 'stopped',
+      data_preserved: true,
+    };
+  }
+
+  @Tool({
+    name: 'restart_node',
+    description:
+      'Restart an existing KVRaft node container while preserving its configuration and data.',
+    inputSchema: z.object({
+      node_id: z.number().int().min(1).max(999),
+    }),
+  })
+  async restartNode(
+    input: { node_id: number },
+    ctx: ExecutionContext,
+  ) {
+    const name = `node${input.node_id}`;
+    const container = docker.getContainer(name);
+
+    await container.inspect();
+    await container.restart({ t: 10 });
+
+    ctx.logger.info(`Restarted KVRaft node ${input.node_id}`);
+
+    return {
+      success: true,
+      node_id: input.node_id,
+      status: 'restarted',
+    };
+  }
+
+  @Tool({
+    name: 'list_node_containers',
+    description:
+      'List KVRaft node containers, including stopped containers, and report their Docker state.',
+    inputSchema: z.object({}),
+  })
+  async listNodeContainers(_input: any, ctx: ExecutionContext) {
+    const containers = await docker.listContainers({ all: true });
+
+    const nodes = containers
+      .filter(container =>
+        container.Names.some(name => /^\/node[1-9]\d*$/.test(name)),
+      )
+      .map(container => ({
+        name: container.Names.find(name =>
+          /^\/node[1-9]\d*$/.test(name),
+        )?.slice(1),
+        status: container.State,
+        state_description: container.Status,
+      }));
+
+    ctx.logger.info(`Listed ${nodes.length} KVRaft node containers`);
+
+    return { success: true, count: nodes.length, nodes };
+  }
+
+
+  @Tool({
     name: 'recommend_recovery',
     description:
-      'Suggest a recovery plan based on the observed failure and its risks.',
-    inputSchema: z.object({
-      failure_summary: z
-        .string()
-        .describe('Brief description of the observed failure'),
-    }),
+      'Inspect current KVRaft cluster health and recommend recovery steps based on live diagnostics. This tool does not perform recovery actions.',
+    inputSchema: z.object({}),
   })
   @Widget('RecoveryAdvisor')
   async recommendRecovery(
-    input: { failure_summary: string },
+    _input: Record<string, never>,
     ctx: ExecutionContext,
   ) {
-    const result = await this.request(
-      '/recovery/recommend',
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          summary: input.failure_summary,
-        }),
-      },
+    const result = await this.request('/diagnose');
+
+    ctx.logger.info('Generated recovery recommendations from live diagnostics');
+
+    if (!result.success || !Array.isArray(result.nodes)) {
+      return {
+        success: false,
+        diagnosis: 'Cluster health unknown',
+        message: result.message ?? 'Could not obtain reliable cluster diagnostics.',
+        recovery_steps: [
+          {
+            order: 1,
+            action: 'inspect_gateway_and_node_logs',
+            description:
+              'Check gateway connectivity and node logs before attempting recovery.',
+            risk: 'low',
+          },
+        ],
+      };
+    }
+
+    const unhealthy = result.nodes.filter(
+      (node: NodeHealth) => !node.reachable || !node.healthy,
     );
 
-    ctx.logger.info('Generated recovery recommendation');
+    if (unhealthy.length === 0) {
+      return {
+        success: true,
+        diagnosis: 'Cluster healthy',
+        message: `${result.healthy_nodes}/${result.cluster_size} nodes healthy; no node-failure recovery is indicated.`,
+        leader_id: result.leader_id ?? null,
+        term: result.term ?? null,
+        recovery_steps: [],
+      };
+    }
 
-    return result;
+    return {
+      success: true,
+      diagnosis: 'Node health issue detected',
+      message: `${unhealthy.length} node(s) are unreachable or unhealthy.`,
+      leader_id: result.leader_id ?? null,
+      term: result.term ?? null,
+      unhealthy_nodes: unhealthy.map(node => ({
+        node_id: node.node_id,
+        address: node.address,
+        reachable: node.reachable,
+        healthy: node.healthy,
+        message: node.message,
+      })),
+      recovery_steps: [
+        {
+          order: 1,
+          action: 'diagnose_nodes',
+          description: 'Inspect each node and verify its reported role and term.',
+          risk: 'none',
+        },
+        {
+          order: 2,
+          action: 'get_recent_errors',
+          description: 'Review recent errors to identify the cause.',
+          risk: 'none',
+        },
+        {
+          order: 3,
+          action: 'inspect_node_logs',
+          description:
+            'Inspect logs for the unhealthy nodes before restarting or changing membership.',
+          risk: 'low',
+        },
+      ],
+    };
   }
 }

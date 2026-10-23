@@ -16,7 +16,8 @@ type ToolKind =
   | 'start_node'
   | 'stop_node'
   | 'register_node'
-  | 'remove_node';
+  | 'remove_node'
+  | 'diagnose_nodes';
 
 type Field = {
   name: string;
@@ -48,6 +49,13 @@ type ThemeColors = {
 };
 
 const CONFIG: Record<ToolKind, ToolConfig> = {
+  diagnose_nodes: {
+    title: 'Node Diagnostics',
+    subtitle:
+      'Check every configured node for reachability, health, latency, and Raft state.',
+    fields: [],
+    button: 'Diagnose nodes',
+  },
   get_cluster_status: {
     title: 'Cluster Status',
     subtitle: 'View the current leader and Raft term.',

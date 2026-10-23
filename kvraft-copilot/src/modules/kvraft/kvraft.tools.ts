@@ -183,7 +183,7 @@ export class KVRaftTools {
       },
     },
   })
-  @Widget('ClusterHealth')
+  @Widget('DiagnoseNodes')
   async diagnoseNodes(_input: any, ctx: ExecutionContext) {
     const result = await this.request('/health/nodes');
 
@@ -619,6 +619,7 @@ export class KVRaftTools {
       ),
     }),
   })
+  @Widget('RegisterNode')
   async registerNode(
     input: { node_id: number; addr: string },
     ctx: ExecutionContext,
@@ -661,6 +662,7 @@ export class KVRaftTools {
       node_id: z.number().int().min(1).max(999),
     }),
   })
+  @Widget('RemoveNode')
   async removeNode(
     input: { node_id: number },
     ctx: ExecutionContext,

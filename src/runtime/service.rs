@@ -1,11 +1,13 @@
 use crate::lsm::wal::log_record::Value;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io;
+use std::sync::Arc;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{mpsc::UnboundedSender, oneshot},
+    sync::{mpsc::UnboundedSender, oneshot, Mutex},
 };
 
 pub enum ServiceOperation {
@@ -15,6 +17,59 @@ pub enum ServiceOperation {
     Status,
     AddNode { id: u64, addr: String },
     RemoveNode { id: u64 },
+}
+
+/// ClusterManager maintains a dynamic registry of node IDs and their addresses.
+/// This is shared between the API server and the Raft runtime so that
+/// /health/node/{id} can look up any node's address, even after dynamic
+/// membership changes via register_node / remove_node.
+#[derive(Clone)]
+pub struct ClusterManager {
+    // Shared inner state protected by a tokio mutex for async access.
+    inner: Arc<Mutex<Inner>>,
+}
+
+struct Inner {
+    // node_id -> "host:port" address
+    nodes: HashMap<u64, String>,
+}
+
+impl ClusterManager {
+    /// Create a new ClusterManager with the given initial nodes.
+    pub fn new(initial: Vec<(u64, String)>) -> Self {
+        let inner = Inner {
+            nodes: initial.into_iter().collect(),
+        };
+        ClusterManager {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+
+    /// Look up the address for a node ID.
+    pub async fn get_address(&self, node_id: u64) -> Option<String> {
+        self.inner.lock().await.nodes.get(&node_id).cloned()
+    }
+
+    /// Add a node to the cluster.
+    pub async fn add_node(&self, node_id: u64, addr: String) {
+        self.inner.lock().await.nodes.insert(node_id, addr);
+    }
+
+    /// Remove a node from the cluster.
+    pub async fn remove_node(&self, node_id: u64) {
+        self.inner.lock().await.nodes.remove(&node_id);
+    }
+}
+
+impl Default for ClusterManager {
+    fn default() -> Self {
+        // Start with the default known nodes.
+        Self::new(vec![
+            (1, "node1:7001".to_string()),
+            (2, "node2:7002".to_string()),
+            (3, "node3:7003".to_string()),
+        ])
+    }
 }
 
 pub struct ServiceRequest {
@@ -53,6 +108,32 @@ enum WireRequest {
         #[serde(rename = "node_id")]
         id: u64,
     },
+}
+
+/// Shared cluster manager instance, passed to the API listener.
+pub struct ApiState {
+    cluster_manager: ClusterManager,
+}
+
+impl ApiState {
+    pub fn new(cluster_manager: ClusterManager) -> Self {
+        Self { cluster_manager }
+    }
+
+    /// Look up a node address by ID.
+    pub async fn get_node_address(&self, node_id: u64) -> Option<String> {
+        self.cluster_manager.get_address(node_id).await
+    }
+
+    /// Add a node to the cluster (called from API handler).
+    pub async fn add_node(&self, node_id: u64, addr: String) {
+        self.cluster_manager.add_node(node_id, addr).await;
+    }
+
+    /// Remove a node from the cluster (called from API handler).
+    pub async fn remove_node(&self, node_id: u64) {
+        self.cluster_manager.remove_node(node_id).await;
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -95,6 +176,7 @@ struct WireResponse {
 pub async fn run_listener(
     addr: String,
     service_tx: UnboundedSender<ServiceRequest>,
+    api_state: Arc<ApiState>,
 ) -> io::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
 
@@ -107,9 +189,10 @@ pub async fn run_listener(
         eprintln!("[API] Connection from {peer}");
 
         let tx = service_tx.clone();
+        let api_state_clone = api_state.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, tx).await {
+            if let Err(e) = handle_connection(stream, tx, api_state_clone).await {
                 eprintln!("[API] Client error: {e}");
             }
         });
@@ -119,6 +202,7 @@ pub async fn run_listener(
 async fn handle_connection(
     stream: TcpStream,
     service_tx: UnboundedSender<ServiceRequest>,
+    api_state: Arc<ApiState>,
 ) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -143,13 +227,22 @@ async fn handle_connection(
                     WireRequest::Delete { key } => ServiceOperation::Delete { key },
                     WireRequest::Status => ServiceOperation::Status,
                     WireRequest::AddNode { id, addr } => {
-                        if id == 0 || addr.trim().is_empty() {
-                            // Handle invalid membership requests before submitting them.
-                            // See the validation note below.
-                        }
-                        ServiceOperation::AddNode { id, addr }
+                        // Update the cluster manager's dynamic node registry.
+                        let api_state_clone = api_state.clone();
+                        let addr_clone = addr.clone();
+                        tokio::spawn(async move {
+                            let _ = api_state_clone.add_node(id, addr_clone).await;
+                        });
+                        ServiceOperation::AddNode { id, addr: addr.clone() }
                     }
-                    WireRequest::RemoveNode { id } => ServiceOperation::RemoveNode { id },
+                    WireRequest::RemoveNode { id } => {
+                        // Update the cluster manager's dynamic node registry.
+                        let api_state_clone = api_state.clone();
+                        tokio::spawn(async move {
+                            let _ = api_state_clone.remove_node(id).await;
+                        });
+                        ServiceOperation::RemoveNode { id }
+                    }
                 };
 
                 let (response_tx, response_rx) = oneshot::channel();
@@ -186,7 +279,6 @@ async fn handle_connection(
                     }
                 }
             }
-
             Err(e) => WireResponse {
                 success: false,
                 value: None,

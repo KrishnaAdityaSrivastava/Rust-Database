@@ -93,8 +93,12 @@ impl Network {
 
         let listener_tx = service_tx.clone();
 
+        // Create a shared ApiState with a ClusterManager for dynamic node registry.
+        let cluster_manager = crate::runtime::service::ClusterManager::default();
+        let api_state = Arc::new(crate::runtime::service::ApiState::new(cluster_manager));
+
         tokio::spawn(async move {
-            if let Err(e) = crate::runtime::service::run_listener(api_addr, listener_tx).await {
+            if let Err(e) = crate::runtime::service::run_listener(api_addr, listener_tx, api_state).await {
                 if super::is_log_enabled() {
                     eprintln!("[API] Listener stopped: {e}");
                 }
